@@ -310,6 +310,7 @@ def handle_message(event):
                      f"💰 費用：${service['price']}\n"
                      f"👤 姓名：{state['name']}\n"
                      f"📞 手機：{text}"
+                     f"⚠️ 請準時抵達，取消請提前告知"
             ))
             del user_state[user_id]
             return
