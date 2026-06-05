@@ -21,7 +21,7 @@ import calendar
 CHANNEL_SECRET = os.environ.get('LINE_CHANNEL_SECRET')
 CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN')
 
-# 店家 LINE ID（多個用逗號分隔）
+# 店家 LINE ID
 admin_ids_str = os.environ.get('ADMIN_USER_IDS', '')
 ADMIN_USER_IDS = [uid.strip() for uid in admin_ids_str.split(',') if uid.strip()]
 # ==========================================
@@ -36,21 +36,21 @@ SERVICES = {
     "2": {"name": "局部紓壓", "price": 800, "duration": 30, "emoji": "💪"}
 }
 
-# 使用 /tmp 目錄儲存（Render 可寫入）
-DATA_FILE = "/tmp/data.json"
+# 使用記憶體儲存（不用檔案）
+appointments_db = []
+next_id = 1
 ITEMS_PER_PAGE = 10
 
 def init_db():
-    if not os.path.exists(DATA_FILE):
-        save_data({"appointments": [], "next_id": 1})
+    pass  # 不需要初始化
 
 def load_data():
-    with open(DATA_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
+    return {"appointments": appointments_db, "next_id": next_id}
 
 def save_data(data):
-    with open(DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    global appointments_db, next_id
+    appointments_db = data.get("appointments", [])
+    next_id = data.get("next_id", 1)
 
 def is_business_day(date_obj):
     return date_obj.weekday() != 4
@@ -65,21 +65,17 @@ def get_available_dates(year, month):
     return dates
 
 def get_available_slots(date_str):
-    """產生時段 - 14:00 到 20:00（最後時段20:00，服務到21:00）"""
     slots = []
     for hour in range(14, 21):
         slots.append(f"{hour:02d}:00")
     
-    data = load_data()
-    booked = [a["time"] for a in data["appointments"] 
+    booked = [a["time"] for a in appointments_db 
               if a["date"] == date_str and a["status"] == "confirmed"]
     
     return [s for s in slots if s not in booked]
 
 def check_duplicate_appointment(user_id, name, phone, date_str, time_str):
-    data = load_data()
-    
-    for a in data["appointments"]:
+    for a in appointments_db:
         if a["status"] != "confirmed":
             continue
         
@@ -93,7 +89,7 @@ def check_duplicate_appointment(user_id, name, phone, date_str, time_str):
             a["time"] == time_str):
             return True, "❌ 這個手機號碼已經在相同時段有預約了！"
     
-    same_day_count = sum(1 for x in data["appointments"] 
+    same_day_count = sum(1 for x in appointments_db 
                         if x["user_id"] == user_id and 
                         x["date"] == date_str and 
                         x["status"] == "confirmed")
@@ -131,14 +127,13 @@ def send_admin_notification(apt_id, name, phone, service_name, service_price, da
         print(f"⚠️ 發送通知失敗: {e}")
 
 def create_appointment(user_id, name, phone, service_id, date_str, time_str):
+    global next_id, appointments_db
+    
     is_duplicate, error_msg = check_duplicate_appointment(user_id, name, phone, date_str, time_str)
     if is_duplicate:
         return None, error_msg
     
-    data = load_data()
     service = SERVICES[service_id]
-    
-    next_id = data.get("next_id", 1)
     
     new_appointment = {
         "id": next_id,
@@ -155,24 +150,22 @@ def create_appointment(user_id, name, phone, service_id, date_str, time_str):
         "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     }
     
-    data["appointments"].append(new_appointment)
-    data["next_id"] = next_id + 1
-    save_data(data)
+    appointments_db.append(new_appointment)
+    current_id = next_id
+    next_id += 1
     
-    send_admin_notification(next_id, name, phone, service["name"], service["price"], date_str, time_str)
+    send_admin_notification(current_id, name, phone, service["name"], service["price"], date_str, time_str)
     
-    return next_id, None
+    return current_id, None
 
 def get_user_appointments(user_id):
-    data = load_data()
-    return [a for a in data["appointments"] if a["user_id"] == user_id and a["status"] == "confirmed"]
+    return [a for a in appointments_db if a["user_id"] == user_id and a["status"] == "confirmed"]
 
 def cancel_appointment(user_id, apt_id):
-    data = load_data()
-    for a in data["appointments"]:
+    global appointments_db
+    for a in appointments_db:
         if a["id"] == apt_id and a["user_id"] == user_id and a["status"] == "confirmed":
             a["status"] = "cancelled"
-            save_data(data)
             return True
     return False
 
@@ -182,8 +175,7 @@ def get_weekday_name(date_str):
     return weekdays[date_obj.weekday()]
 
 def admin_view_all():
-    data = load_data()
-    confirmed = [a for a in data["appointments"] if a["status"] == "confirmed"]
+    confirmed = [a for a in appointments_db if a["status"] == "confirmed"]
     
     if not confirmed:
         return "📋 目前沒有任何預約"
@@ -205,9 +197,8 @@ def admin_view_all():
     return msg
 
 def admin_view_month(year, month):
-    data = load_data()
     month_str = f"{year}-{month:02d}"
-    confirmed = [a for a in data["appointments"] 
+    confirmed = [a for a in appointments_db 
                  if a["status"] == "confirmed" and a["date"].startswith(month_str)]
     
     if not confirmed:
@@ -228,11 +219,10 @@ def admin_view_month(year, month):
     return msg
 
 def admin_cancel_by_id(apt_id):
-    data = load_data()
-    for a in data["appointments"]:
+    global appointments_db
+    for a in appointments_db:
         if a["id"] == apt_id and a["status"] == "confirmed":
             a["status"] = "cancelled"
-            save_data(data)
             return f"✅ 已取消預約 #{apt_id}\n客戶: {a['customer_name']}\n日期: {a['date']} {a['time']}"
     return f"❌ 找不到預約 #{apt_id}"
 
@@ -517,7 +507,7 @@ def handle_postback(event):
             items.append(QuickReplyItem(action=PostbackAction(label=slot, data=f"time_{slot}")))
         
         send_reply(reply_token, TextMessage(
-            text=f"📅 {date_str} {weekday}\n\n⏰ 營業時間：14:00-21:00（最後時段20:00）\n\n請選擇時段：",
+            text=f"📅 {date_str} {weekday}\n\n⏰ 營業時間：14:00-21:00\n\n請選擇時段：",
             quick_reply=QuickReply(items=items)
         ))
     
