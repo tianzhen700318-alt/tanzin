@@ -421,7 +421,6 @@ def handle_message(event):
             "✅ 輸入「我要預約」開始\n"
             "✅ 輸入「我的預約」查詢\n"
             "✅ 輸入「取消查詢」取消\n"
-            "✅ 店家輸入「店家後台」"
         )
         
         send_reply(reply_token, TextMessage(
