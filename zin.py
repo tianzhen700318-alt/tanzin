@@ -36,7 +36,8 @@ SERVICES = {
     "2": {"name": "局部紓壓", "price": 800, "duration": 30, "emoji": "💪"}
 }
 
-DATA_FILE = "data.json"
+# 使用 /tmp 目錄儲存（Render 可寫入）
+DATA_FILE = "/tmp/data.json"
 ITEMS_PER_PAGE = 10
 
 def init_db():
@@ -64,6 +65,7 @@ def get_available_dates(year, month):
     return dates
 
 def get_available_slots(date_str):
+    """產生時段 - 14:00 到 20:00（最後時段20:00，服務到21:00）"""
     slots = []
     for hour in range(14, 21):
         slots.append(f"{hour:02d}:00")
@@ -254,10 +256,8 @@ def get_service_buttons():
         )))
     return items
 
-# ========== 關鍵：修復後的 callback ==========
 @app.route("/callback", methods=['POST'])
 def callback():
-    # 獲取簽章
     signature = request.headers.get('X-Line-Signature', '')
     if not signature:
         return 'Missing signature', 400
@@ -517,7 +517,7 @@ def handle_postback(event):
             items.append(QuickReplyItem(action=PostbackAction(label=slot, data=f"time_{slot}")))
         
         send_reply(reply_token, TextMessage(
-            text=f"📅 {date_str} {weekday}\n\n⏰ 營業時間：14:00-20:00\n\n請選擇時段：",
+            text=f"📅 {date_str} {weekday}\n\n⏰ 營業時間：14:00-21:00（最後時段20:00）\n\n請選擇時段：",
             quick_reply=QuickReply(items=items)
         ))
     
@@ -597,5 +597,5 @@ def show_date_page(user_id, reply_token):
 
 if __name__ == "__main__":
     init_db()
-    port = int(os.environ.get('PORT', 5000))
+    port = int(os.environ.get('PORT', 10000))
     app.run(host='0.0.0.0', port=port)
