@@ -1,4 +1,4 @@
-Flask
-line-bot-sdk
-gunicorn
-python-dotenv
+Flask==2.3.3
+line-bot-sdk==3.5.0
+gunicorn==21.2.0
+python-dotenv==1.0.0
