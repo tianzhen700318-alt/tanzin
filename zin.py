@@ -1,5 +1,5 @@
 from dotenv import load_dotenv
-load_dotenv()  # 載入 .env 檔案
+load_dotenv()
 
 from flask import Flask, request
 from linebot.v3 import WebhookHandler
@@ -17,12 +17,13 @@ import json
 import os
 import calendar
 
-# ========== 請填入你的 LINE 金鑰 ==========
-CHANNEL_SECRET = os.environ.get('LINE_CHANNEL_SECRET', "你的32字元Channel Secret")
-CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN', "你的完整Access Token")
+# ========== 從環境變數讀取 LINE 金鑰 ==========
+CHANNEL_SECRET = os.environ.get('LINE_CHANNEL_SECRET')
+CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN')
 
-# 店家 LINE ID（填入你的 LINE ID，會收到預約通知）
-ADMIN_USER_IDS = os.environ.get('ADMIN_USER_IDS', "U你的LINE_ID").split(",")
+# 店家 LINE ID（多個用逗號分隔）
+admin_ids_str = os.environ.get('ADMIN_USER_IDS', '')
+ADMIN_USER_IDS = [uid.strip() for uid in admin_ids_str.split(',') if uid.strip()]
 # ==========================================
 
 app = Flask(__name__)
@@ -63,7 +64,6 @@ def get_available_dates(year, month):
     return dates
 
 def get_available_slots(date_str):
-    """產生時段 - 14:00 到 20:00（共7個時段）"""
     slots = []
     for hour in range(14, 21):
         slots.append(f"{hour:02d}:00")
@@ -74,9 +74,7 @@ def get_available_slots(date_str):
     
     return [s for s in slots if s not in booked]
 
-# ========== 完整防呆機制 ==========
 def check_duplicate_appointment(user_id, name, phone, date_str, time_str):
-    """完整防呆檢查 - 防止重複預約"""
     data = load_data()
     
     for a in data["appointments"]:
@@ -86,50 +84,38 @@ def check_duplicate_appointment(user_id, name, phone, date_str, time_str):
         if (a["user_id"] == user_id and 
             a["date"] == date_str and 
             a["time"] == time_str):
-            return True, "❌ 您已經在這個時段有預約了！\n\n請選擇其他時段或先取消原預約。"
-        
-        if (a["customer_name"] == name and 
-            a["customer_phone"] == phone and 
-            a["date"] == date_str and 
-            a["time"] == time_str):
-            return True, "❌ 這個姓名和手機已經在相同時段有預約了！\n\n請選擇其他時段。"
+            return True, "❌ 您已經在這個時段有預約了！"
         
         if (a["customer_phone"] == phone and 
             a["date"] == date_str and 
             a["time"] == time_str):
-            return True, "❌ 這個手機號碼已經在相同時段有預約了！\n\n請選擇其他時段。"
+            return True, "❌ 這個手機號碼已經在相同時段有預約了！"
     
     same_day_count = sum(1 for x in data["appointments"] 
                         if x["user_id"] == user_id and 
                         x["date"] == date_str and 
                         x["status"] == "confirmed")
     if same_day_count >= 3:
-        return True, "❌ 您同一天最多只能預約3個時段！\n\n請選擇其他日期。"
+        return True, "❌ 您同一天最多只能預約3個時段！"
     
     return False, None
 
 def send_admin_notification(apt_id, name, phone, service_name, service_price, date_str, time_str):
-    """發送預約通知給店家"""
     weekday = get_weekday_name(date_str)
     notification_msg = (
         f"🔔 新預約通知！\n\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"📌 預約編號：{apt_id}\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"📅 日期：{date_str} {weekday}\n"
         f"⏰ 時間：{time_str}\n"
         f"💆 服務：{service_name}\n"
         f"💰 金額：${service_price}\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"👤 客戶姓名：{name}\n"
-        f"📞 聯絡電話：{phone}\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"⏰ 預約時間：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        f"👤 客戶：{name}\n"
+        f"📞 電話：{phone}"
     )
     
     try:
         for admin_id in ADMIN_USER_IDS:
-            if admin_id and admin_id != "U你的LINE_ID":
+            if admin_id:
                 with ApiClient(configuration) as api_client:
                     line_bot_api = MessagingApi(api_client)
                     line_bot_api.push_message(
@@ -138,7 +124,7 @@ def send_admin_notification(apt_id, name, phone, service_name, service_price, da
                             messages=[TextMessage(text=notification_msg)]
                         )
                     )
-        print(f"✅ 已發送預約通知給店家")
+        print(f"✅ 已發送預約通知")
     except Exception as e:
         print(f"⚠️ 發送通知失敗: {e}")
 
@@ -193,8 +179,6 @@ def get_weekday_name(date_str):
     weekdays = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
     return weekdays[date_obj.weekday()]
 
-# ========== 店家後台功能 ==========
-
 def admin_view_all():
     data = load_data()
     confirmed = [a for a in data["appointments"] if a["status"] == "confirmed"]
@@ -208,16 +192,14 @@ def admin_view_all():
     msg = "📋 所有預約清單\n\n"
     for apt in confirmed:
         weekday = get_weekday_name(apt["date"])
-        msg += f"🔹 預約編號 #{apt['id']}\n"
+        msg += f"🔹 #{apt['id']}\n"
         msg += f"   📅 {apt['date']} {weekday}\n"
         msg += f"   ⏰ {apt['time']}\n"
         msg += f"   💆 {apt['service_name']}\n"
         msg += f"   👤 {apt['customer_name']}\n"
         msg += f"   📞 {apt['customer_phone']}\n\n"
     
-    msg += f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-    msg += f"總計: {len(confirmed)} 筆預約\n"
-    msg += f"總營收: ${total_revenue}"
+    msg += f"總計: {len(confirmed)} 筆預約\n總營收: ${total_revenue}"
     return msg
 
 def admin_view_month(year, month):
@@ -235,16 +217,12 @@ def admin_view_month(year, month):
     msg = f"📋 {year}年{month}月 預約清單\n\n"
     for apt in confirmed:
         weekday = get_weekday_name(apt["date"])
-        msg += f"🔹 預約編號 #{apt['id']}\n"
-        msg += f"   📅 {apt['date']} {weekday}\n"
-        msg += f"   ⏰ {apt['time']}\n"
+        msg += f"🔹 {apt['date']} {weekday} {apt['time']}\n"
         msg += f"   💆 {apt['service_name']}\n"
         msg += f"   👤 {apt['customer_name']}\n"
         msg += f"   📞 {apt['customer_phone']}\n\n"
     
-    msg += f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-    msg += f"總計: {len(confirmed)} 筆預約\n"
-    msg += f"總營收: ${total_revenue}"
+    msg += f"總計: {len(confirmed)} 筆預約\n總營收: ${total_revenue}"
     return msg
 
 def admin_cancel_by_id(apt_id):
@@ -276,9 +254,14 @@ def get_service_buttons():
         )))
     return items
 
+# ========== 關鍵：修復後的 callback ==========
 @app.route("/callback", methods=['POST'])
 def callback():
-    signature = request.headers['X-Line-Signature']
+    # 獲取簽章
+    signature = request.headers.get('X-Line-Signature', '')
+    if not signature:
+        return 'Missing signature', 400
+    
     body = request.get_data(as_text=True)
     
     try:
@@ -288,6 +271,7 @@ def callback():
     except Exception as e:
         print(f"錯誤: {e}")
         return 'OK', 200
+    
     return 'OK', 200
 
 @app.route("/", methods=['GET'])
@@ -320,7 +304,7 @@ def handle_message(event):
             )
             
             if error:
-                send_reply(reply_token, TextMessage(text=f"❌ {error}\n\n請重新選擇其他時段"))
+                send_reply(reply_token, TextMessage(text=f"❌ {error}\n\n請重新選擇"))
                 del user_state[user_id]
                 return
             
@@ -329,18 +313,13 @@ def handle_message(event):
             
             send_reply(reply_token, TextMessage(
                 text=f"✅ 預約成功！\n\n"
-                     f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                      f"📌 預約編號：{apt_id}\n"
-                     f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                      f"📅 日期：{state['selected_date']} {weekday}\n"
                      f"⏰ 時間：{state['selected_time']}\n"
                      f"💆 服務：{service['name']}\n"
                      f"💰 費用：${service['price']}\n"
-                     f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                      f"👤 姓名：{state['name']}\n"
-                     f"📞 手機：{text}\n"
-                     f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                     f"⚠️ 請準時到達，取消請提前告知。"
+                     f"📞 手機：{text}"
             ))
             del user_state[user_id]
             return
@@ -352,7 +331,7 @@ def handle_message(event):
                 user_state[user_id] = state
                 send_reply(reply_token, TextMessage(text="請輸入月份 (1-12)："))
             except ValueError:
-                send_reply(reply_token, TextMessage(text="❌ 請輸入正確的年份數字（例如 2026）"))
+                send_reply(reply_token, TextMessage(text="❌ 請輸入正確的年份"))
             return
         
         elif state.get("step") == "admin_waiting_month":
@@ -363,10 +342,10 @@ def handle_message(event):
                     result = admin_view_month(year, month)
                     send_reply(reply_token, TextMessage(text=result))
                 else:
-                    send_reply(reply_token, TextMessage(text="❌ 月份請輸入 1-12 之間的數字"))
+                    send_reply(reply_token, TextMessage(text="❌ 月份請輸入 1-12"))
                 del user_state[user_id]
             except ValueError:
-                send_reply(reply_token, TextMessage(text="❌ 請輸入正確的月份數字（1-12）"))
+                send_reply(reply_token, TextMessage(text="❌ 請輸入正確的月份"))
                 del user_state[user_id]
             return
         
@@ -377,27 +356,17 @@ def handle_message(event):
                 send_reply(reply_token, TextMessage(text=result))
                 del user_state[user_id]
             except ValueError:
-                send_reply(reply_token, TextMessage(text="❌ 請輸入正確的預約編號數字"))
+                send_reply(reply_token, TextMessage(text="❌ 請輸入正確的編號"))
                 del user_state[user_id]
             return
     
-    # ========== 關鍵字觸發：只有輸入「我要預約」才會開始預約 ==========
     if text == "我要預約":
         welcome_msg = (
-            "╔════════════════════════════════════╗\n"
-            "║       🧠 頭薦骨調理預約系統          ║\n"
-            "╚════════════════════════════════════╝\n\n"
-            "📅 營業時間：14:00 - 20:00\n"
+            "🧠 頭薦骨調理預約系統\n\n"
+            "📅 營業時間：14:00 - 21:00\n"
             "⏰ 每小時一個時段\n"
             "📴 公休日：每週五\n\n"
-            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            "【服務項目】\n\n"
-            "💆 健康調理\n"
-            "   💰 $1500 / 60分鐘\n\n"
-            "💪 局部紓壓\n"
-            "   💰 $800 / 30分鐘\n\n"
-            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            "👇 請點擊下方按鈕選擇服務"
+            "請選擇服務項目："
         )
         
         send_reply(reply_token, TextMessage(
@@ -413,7 +382,7 @@ def handle_message(event):
             msg = "📋 您的預約：\n\n"
             for a in apps:
                 weekday = get_weekday_name(a["date"])
-                msg += f"🔹 預約編號 #{a['id']}\n"
+                msg += f"🔹 編號 {a['id']}\n"
                 msg += f"   📅 {a['date']} {weekday}\n"
                 msg += f"   ⏰ {a['time']}\n"
                 msg += f"   💆 {a['service_name']}\n"
@@ -428,7 +397,7 @@ def handle_message(event):
             items = []
             for a in apps:
                 items.append(QuickReplyItem(action=PostbackAction(
-                    label=f"取消 #{a['id']} {a['date'][5:]} {a['time']}",
+                    label=f"取消 {a['date'][5:]} {a['time']}",
                     data=f"cancel_{a['id']}"
                 )))
             send_reply(reply_token, TextMessage(
@@ -442,30 +411,26 @@ def handle_message(event):
                 QuickReplyItem(action=PostbackAction(label="📋 所有預約", data="admin_all")),
                 QuickReplyItem(action=PostbackAction(label="📅 按月查詢", data="admin_month")),
                 QuickReplyItem(action=PostbackAction(label="❌ 取消預約", data="admin_cancel")),
-                QuickReplyItem(action=MessageAction(label="🔙 返回主選單", text="我要預約"))
+                QuickReplyItem(action=MessageAction(label="🔙 返回", text="我要預約"))
             ]
             send_reply(reply_token, TextMessage(
-                text="🔐 店家後台系統\n\n請選擇功能：",
+                text="🔐 店家後台\n\n請選擇功能：",
                 quick_reply=QuickReply(items=items)
             ))
         else:
             send_reply(reply_token, TextMessage(
-                text=f"⛔ 您沒有權限使用店家後台\n\n您的 LINE ID 是：{user_id}\n請將這個 ID 填入環境變數 ADMIN_USER_IDS"
+                text=f"⛔ 無權限\n\n您的 LINE ID：{user_id}"
             ))
     
     else:
         welcome_msg = (
-            "╔════════════════════════════════════╗\n"
-            "║       🧠 頭薦骨調理預約系統          ║\n"
-            "╚════════════════════════════════════╝\n\n"
-            "📅 營業時間：14:00 - 20:00\n"
-            "⏰ 每小時一個時段\n"
+            "🧠 頭薦骨調理預約系統\n\n"
+            "📅 營業時間：14:00 - 21:00\n"
             "📴 公休日：每週五\n\n"
-            "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-            "✅ 輸入「我要預約」開始預約\n"
-            "✅ 輸入「我的預約」查詢記錄\n"
-            "✅ 輸入「取消查詢」取消預約\n"
-            "✅ 店家請輸入「店家後台」"
+            "✅ 輸入「我要預約」開始\n"
+            "✅ 輸入「我的預約」查詢\n"
+            "✅ 輸入「取消查詢」取消\n"
+            "✅ 店家輸入「店家後台」"
         )
         
         send_reply(reply_token, TextMessage(
@@ -486,11 +451,7 @@ def handle_postback(event):
 
     if data.startswith("service_"):
         service_id = data.split("_")[1]
-        user_state[user_id] = {
-            "step": "waiting_year", 
-            "service_id": service_id,
-            "date_page": 0
-        }
+        user_state[user_id] = {"step": "waiting_year", "service_id": service_id, "date_page": 0}
         
         items = []
         current_year = datetime.now().year
@@ -556,7 +517,7 @@ def handle_postback(event):
             items.append(QuickReplyItem(action=PostbackAction(label=slot, data=f"time_{slot}")))
         
         send_reply(reply_token, TextMessage(
-            text=f"📅 {date_str} {weekday}\n\n⏰ 營業時間：14:00-20:00（每小時）\n\n請選擇時段：",
+            text=f"📅 {date_str} {weekday}\n\n⏰ 營業時間：14:00-20:00\n\n請選擇時段：",
             quick_reply=QuickReply(items=items)
         ))
     
@@ -577,27 +538,26 @@ def handle_postback(event):
     
     elif data == "admin_all":
         if user_id not in ADMIN_USER_IDS:
-            send_reply(reply_token, TextMessage(text="⛔ 您沒有權限"))
+            send_reply(reply_token, TextMessage(text="⛔ 無權限"))
             return
         result = admin_view_all()
         send_reply(reply_token, TextMessage(text=result))
     
     elif data == "admin_month":
         if user_id not in ADMIN_USER_IDS:
-            send_reply(reply_token, TextMessage(text="⛔ 您沒有權限"))
+            send_reply(reply_token, TextMessage(text="⛔ 無權限"))
             return
         user_state[user_id] = {"step": "admin_waiting_year"}
         send_reply(reply_token, TextMessage(text="請輸入年份 (例如 2026)："))
     
     elif data == "admin_cancel":
         if user_id not in ADMIN_USER_IDS:
-            send_reply(reply_token, TextMessage(text="⛔ 您沒有權限"))
+            send_reply(reply_token, TextMessage(text="⛔ 無權限"))
             return
         user_state[user_id] = {"step": "admin_waiting_cancel_id"}
         send_reply(reply_token, TextMessage(text="請輸入要取消的預約編號："))
 
 def show_date_page(user_id, reply_token):
-    """顯示日期分頁"""
     state = user_state.get(user_id, {})
     all_dates = state.get("all_dates", [])
     year = state.get("year", datetime.now().year)
@@ -631,32 +591,11 @@ def show_date_page(user_id, reply_token):
         )))
     
     send_reply(reply_token, TextMessage(
-        text=f"📅 {year}年{month}月\n\n共 {len(all_dates)} 天可預約（第{current_page + 1}/{total_pages}頁）\n\n請選擇日期：",
+        text=f"📅 {year}年{month}月\n\n共 {len(all_dates)} 天（第{current_page + 1}/{total_pages}頁）\n\n請選擇日期：",
         quick_reply=QuickReply(items=items)
     ))
 
 if __name__ == "__main__":
     init_db()
-    print("="*50)
-    print("✅ 預約機器人啟動成功！")
-    print("="*50)
-    print("📅 營業時間：14:00 - 20:00（每小時）")
-    print("   時段：14:00, 15:00, 16:00, 17:00, 18:00, 19:00, 20:00")
-    print("📴 公休日：每週五")
-    print("-"*50)
-    print("🔑 關鍵字觸發：")
-    print("   輸入「我要預約」開始預約流程")
-    print("   輸入「我的預約」查詢記錄")
-    print("   輸入「取消查詢」取消預約")
-    print("   輸入「店家後台」管理預約")
-    print("-"*50)
-    print("🛡️ 防呆機制：")
-    print("   1. 同 LINE 帳號同時段不可重複預約")
-    print("   2. 同手機號碼同時段不可重複預約")
-    print("   3. 同一天最多預約3個時段")
-    print("-"*50)
-    print(f"📌 店家 ID: {ADMIN_USER_IDS}")
-    print("="*50)
-    
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
