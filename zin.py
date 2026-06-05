@@ -309,7 +309,7 @@ def handle_message(event):
                      f"💆 服務：{service['name']}\n"
                      f"💰 費用：${service['price']}\n"
                      f"👤 姓名：{state['name']}\n"
-                     f"📞 手機：{text}"
+                     f"📞 手機：{text}\n"
                      f"⚠️ 請準時抵達，取消請提前告知"
             ))
             del user_state[user_id]
