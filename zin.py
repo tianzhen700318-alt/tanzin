@@ -16,6 +16,7 @@ from datetime import datetime
 import json
 import os
 import calendar
+import requests  # 新增：用於 Google Sheets
 
 # ========== 從環境變數讀取 LINE 金鑰 ==========
 CHANNEL_SECRET = os.environ.get('LINE_CHANNEL_SECRET')
@@ -24,6 +25,10 @@ CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN')
 # 店家 LINE ID
 admin_ids_str = os.environ.get('ADMIN_USER_IDS', '')
 ADMIN_USER_IDS = [uid.strip() for uid in admin_ids_str.split(',') if uid.strip()]
+
+# ========== Google Sheets 設定 ==========
+# 請將下面的網址替換成你部署的 Google Apps Script 網址
+GOOGLE_SHEETS_URL = os.environ.get('GOOGLE_SHEETS_URL', '')
 # ==========================================
 
 app = Flask(__name__)
@@ -98,6 +103,46 @@ def check_duplicate_appointment(user_id, name, phone, date_str, time_str):
     
     return False, None
 
+# ========== 新增：寫入 Google Sheets ==========
+def write_to_google_sheets(appointment):
+    """將預約資料寫入 Google Sheets"""
+    if not GOOGLE_SHEETS_URL:
+        print("⚠️ 未設定 GOOGLE_SHEETS_URL，跳過寫入")
+        return False
+    
+    try:
+        weekday = get_weekday_name(appointment["date"])
+        
+        data = {
+            "id": appointment["id"],
+            "date": appointment["date"],
+            "weekday": weekday,
+            "time": appointment["time"],
+            "service": appointment["service_name"],
+            "price": appointment["service_price"],
+            "name": appointment["customer_name"],
+            "phone": appointment["customer_phone"],
+            "created_at": appointment["created_at"]
+        }
+        
+        response = requests.post(
+            GOOGLE_SHEETS_URL,
+            json=data,
+            headers={"Content-Type": "application/json"},
+            timeout=10
+        )
+        
+        if response.status_code == 200:
+            print(f"✅ 已寫入 Google Sheets - 預約編號: {appointment['id']}")
+            return True
+        else:
+            print(f"⚠️ 寫入 Google Sheets 失敗: {response.text}")
+            return False
+    except Exception as e:
+        print(f"⚠️ 寫入 Google Sheets 例外: {e}")
+        return False
+# ==========================================
+
 def send_admin_notification(apt_id, name, phone, service_name, service_price, date_str, time_str):
     weekday = get_weekday_name(date_str)
     notification_msg = (
@@ -155,6 +200,10 @@ def create_appointment(user_id, name, phone, service_id, date_str, time_str):
     next_id += 1
     
     send_admin_notification(current_id, name, phone, service["name"], service["price"], date_str, time_str)
+    
+    # ========== 新增：寫入 Google Sheets ==========
+    write_to_google_sheets(new_appointment)
+    # ===========================================
     
     return current_id, None
 
