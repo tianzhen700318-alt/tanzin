@@ -253,57 +253,88 @@ def get_weekday_name(date_str):
     weekdays = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
     return weekdays[date_obj.weekday()]
 
+# ========== 店家後台功能（從 Google Sheets 讀取）==========
 def admin_view_all():
-    confirmed = [a for a in appointments_db if a["status"] == "confirmed"]
+    """從 Google Sheets 讀取所有預約"""
+    if not GOOGLE_SHEETS_URL:
+        return "⚠️ 未設定 GOOGLE_SHEETS_URL，無法讀取資料"
     
-    if not confirmed:
-        return "📋 目前沒有任何預約"
-    
-    confirmed.sort(key=lambda x: (x["date"], x["time"]))
-    total_revenue = sum(a["service_price"] for a in confirmed)
-    
-    msg = "📋 所有預約清單\n\n"
-    for apt in confirmed:
-        weekday = get_weekday_name(apt["date"])
-        msg += f"🔹 #{apt['id']}\n"
-        msg += f"   📅 {apt['date']} {weekday}\n"
-        msg += f"   ⏰ {apt['time']}\n"
-        msg += f"   💆 {apt['service_name']}\n"
-        msg += f"   👤 {apt['customer_name']}\n"
-        msg += f"   📞 {apt['customer_phone']}\n\n"
-    
-    msg += f"總計: {len(confirmed)} 筆預約\n總營收: ${total_revenue}"
-    return msg
+    try:
+        response = requests.get(GOOGLE_SHEETS_URL, timeout=10)
+        result = response.json()
+        
+        if not result.get('success'):
+            return f"⚠️ 讀取失敗: {result.get('error')}"
+        
+        appointments = result.get('data', [])
+        
+        if not appointments:
+            return "📋 目前沒有任何預約"
+        
+        total_revenue = sum(int(a.get('price', 0)) for a in appointments)
+        
+        msg = "📋 所有預約清單（來自Google試算表）\n\n"
+        for apt in appointments:
+            msg += f"🔹 #{apt['id']}\n"
+            msg += f"   📅 {apt['date']} {apt['weekday']}\n"
+            msg += f"   ⏰ {apt['time']}\n"
+            msg += f"   💆 {apt['service']}\n"
+            msg += f"   💰 ${apt['price']}\n"
+            msg += f"   👤 {apt['name']}\n"
+            msg += f"   📞 {apt['phone']}\n\n"
+        
+        msg += f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        msg += f"總計: {len(appointments)} 筆預約\n"
+        msg += f"總營收: ${total_revenue}"
+        return msg
+        
+    except Exception as e:
+        return f"⚠️ 讀取失敗: {e}"
 
 def admin_view_month(year, month):
-    month_str = f"{year}-{month:02d}"
-    confirmed = [a for a in appointments_db 
-                 if a["status"] == "confirmed" and a["date"].startswith(month_str)]
+    """從 Google Sheets 讀取指定月份的預約"""
+    if not GOOGLE_SHEETS_URL:
+        return "⚠️ 未設定 GOOGLE_SHEETS_URL，無法讀取資料"
     
-    if not confirmed:
-        return f"📋 {year}年{month}月 沒有任何預約"
-    
-    confirmed.sort(key=lambda x: (x["date"], x["time"]))
-    total_revenue = sum(a["service_price"] for a in confirmed)
-    
-    msg = f"📋 {year}年{month}月 預約清單\n\n"
-    for apt in confirmed:
-        weekday = get_weekday_name(apt["date"])
-        msg += f"🔹 {apt['date']} {weekday} {apt['time']}\n"
-        msg += f"   💆 {apt['service_name']}\n"
-        msg += f"   👤 {apt['customer_name']}\n"
-        msg += f"   📞 {apt['customer_phone']}\n\n"
-    
-    msg += f"總計: {len(confirmed)} 筆預約\n總營收: ${total_revenue}"
-    return msg
+    try:
+        response = requests.get(GOOGLE_SHEETS_URL, timeout=10)
+        result = response.json()
+        
+        if not result.get('success'):
+            return f"⚠️ 讀取失敗: {result.get('error')}"
+        
+        appointments = result.get('data', [])
+        month_str = f"{year}-{month:02d}"
+        
+        filtered = [a for a in appointments if a['date'].startswith(month_str)]
+        
+        if not filtered:
+            return f"📋 {year}年{month}月 沒有任何預約"
+        
+        total_revenue = sum(int(a.get('price', 0)) for a in filtered)
+        
+        msg = f"📋 {year}年{month}月 預約清單（來自Google試算表）\n\n"
+        for apt in filtered:
+            msg += f"🔹 #{apt['id']}\n"
+            msg += f"   📅 {apt['date']} {apt['weekday']}\n"
+            msg += f"   ⏰ {apt['time']}\n"
+            msg += f"   💆 {apt['service']}\n"
+            msg += f"   💰 ${apt['price']}\n"
+            msg += f"   👤 {apt['name']}\n"
+            msg += f"   📞 {apt['phone']}\n\n"
+        
+        msg += f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        msg += f"總計: {len(filtered)} 筆預約\n"
+        msg += f"總營收: ${total_revenue}"
+        return msg
+        
+    except Exception as e:
+        return f"⚠️ 讀取失敗: {e}"
 
 def admin_cancel_by_id(apt_id):
-    global appointments_db
-    for a in appointments_db:
-        if a["id"] == apt_id and a["status"] == "confirmed":
-            a["status"] = "cancelled"
-            return f"✅ 已取消預約 #{apt_id}\n客戶: {a['customer_name']}\n日期: {a['date']} {a['time']}"
-    return f"❌ 找不到預約 #{apt_id}"
+    """取消預約（提示在 Google Sheets 中手動處理）"""
+    return f"⚠️ 請直接在 Google 試算表中刪除或標記預約 #{apt_id}\n\n網址：{GOOGLE_SHEETS_URL}"
+# ==========================================
 
 user_state = {}
 
@@ -543,14 +574,11 @@ def handle_postback(event):
         state["step"] = "waiting_month"
         user_state[user_id] = state
         
-        # ✅ 修改：過濾掉已過去的月份
         now = get_taiwan_now()
         items = []
         for i in range(1, 13):
-            # 如果選的年份已過去，不顯示任何月份（理論上不會發生，因為年份只顯示當年和明年）
             if year < now.year:
                 break
-            # 如果是今年，跳過已過去的月份
             if year == now.year and i < now.month:
                 continue
             items.append(QuickReplyItem(action=PostbackAction(
@@ -607,7 +635,6 @@ def handle_postback(event):
         for slot in slots:
             items.append(QuickReplyItem(action=PostbackAction(label=slot, data=f"time_{slot}")))
         
-        # ✅ 新增：返回選日期按鈕
         items.append(QuickReplyItem(action=PostbackAction(
             label="⬅️ 返回選日期",
             data="back_to_date"
@@ -618,7 +645,6 @@ def handle_postback(event):
             quick_reply=QuickReply(items=items)
         ))
     
-    # ✅ 新增：處理返回選日期
     elif data == "back_to_date":
         state = user_state.get(user_id, {})
         state["step"] = "waiting_date"
