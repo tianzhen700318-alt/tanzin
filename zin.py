@@ -42,7 +42,7 @@ next_id = 1
 ITEMS_PER_PAGE = 10
 
 def init_db():
-    pass  # 不需要初始化
+    pass
 
 def load_data():
     return {"appointments": appointments_db, "next_id": next_id}
@@ -279,9 +279,9 @@ def handle_message(event):
     if user_id in user_state:
         state = user_state[user_id]
         
-        # ========== 整合版：支援「姓名 手機」一起填 ==========
+        # ========== 只支援「姓名 手機」一起填 ==========
         if state.get("step") == "waiting_name":
-            # 嘗試解析「姓名 手機」格式（用空格分開）
+            # 解析「姓名 手機」格式（用空格分開）
             parts = text.strip().split()
             
             if len(parts) >= 2:
@@ -289,7 +289,7 @@ def handle_message(event):
                 state["name"] = parts[0]
                 state["phone"] = parts[1]
                 
-                # 直接建立預約（跳過 waiting_phone 步驟）
+                # 直接建立預約
                 apt_id, error = create_appointment(
                     user_id, state["name"], state["phone"],
                     state["service_id"], state["selected_date"], state["selected_time"]
@@ -317,45 +317,17 @@ def handle_message(event):
                 del user_state[user_id]
                 return
             else:
-                # 沒有空格，當作只有姓名，進入傳統流程
-                state["name"] = text
-                state["step"] = "waiting_phone"
-                user_state[user_id] = state
+                # 格式錯誤，重新輸入
                 send_reply(reply_token, TextMessage(
-                    text=f"👤 姓名：{text}\n\n"
-                         f"⚠️ 提示：您也可以一次輸入「姓名 手機」（中間空格）\n\n"
-                         f"請輸入手機號碼："
+                    text="❌ 請輸入正確格式\n\n"
+                         "請輸入您的姓名和手機號碼，中間用空格隔開\n\n"
+                         "範例：王小明 0912345678"
                 ))
                 return
         
         elif state.get("step") == "waiting_phone":
-            state["phone"] = text
-            apt_id, error = create_appointment(
-                user_id, state["name"], text,
-                state["service_id"], state["selected_date"], state["selected_time"]
-            )
-            
-            if error:
-                send_reply(reply_token, TextMessage(text=f"❌ {error}\n\n請重新選擇"))
-                del user_state[user_id]
-                return
-            
-            service = SERVICES[state["service_id"]]
-            weekday = get_weekday_name(state["selected_date"])
-            
-            send_reply(reply_token, TextMessage(
-                text=f"✅ 預約成功！\n\n"
-                     f"📌 預約編號：{apt_id}\n"
-                     f"📅 日期：{state['selected_date']} {weekday}\n"
-                     f"⏰ 時間：{state['selected_time']}\n"
-                     f"💆 服務：{service['name']}\n"
-                     f"💰 費用：${service['price']}\n"
-                     f"👤 姓名：{state['name']}\n"
-                     f"📞 手機：{text}\n"
-                     f"⚠️ 請準時抵達，取消請提前告知"
-            ))
-            del user_state[user_id]
-            return
+            # 不再使用這個步驟
+            pass
         
         elif state.get("step") == "admin_waiting_year":
             try:
@@ -559,12 +531,9 @@ def handle_postback(event):
         state["selected_time"] = time_str
         state["step"] = "waiting_name"
         user_state[user_id] = state
-        # 更新提示訊息，支援一起填寫
         send_reply(reply_token, TextMessage(
             text=f"⏰ 時段：{time_str}\n\n"
-                 f"請輸入您的姓名和手機號碼\n\n"
-                 f"📝 分開輸入：先輸入姓名，再輸入手機\n"
-                 f"⚡ 快速輸入：姓名 手機（中間空格）\n\n"
+                 f"請輸入您的姓名和手機號碼（中間用空格隔開）\n\n"
                  f"範例：王小明 0912345678"
         ))
     
