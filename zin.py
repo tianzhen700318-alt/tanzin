@@ -23,7 +23,6 @@ CHANNEL_SECRET = os.environ.get('LINE_CHANNEL_SECRET')
 CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN')
 
 # 店家 LINE ID（多個用逗號分隔）
-# 範例：ADMIN_USER_IDS = "Uaaaaa,Ubbbbb,Uccccc"
 admin_ids_str = os.environ.get('ADMIN_USER_IDS', '')
 ADMIN_USER_IDS = [uid.strip() for uid in admin_ids_str.split(',') if uid.strip()]
 
@@ -60,7 +59,7 @@ def save_data(data):
 def is_business_day(date_obj):
     return date_obj.weekday() != 4
 
-# ========== 修改1：過期日期不顯示 ==========
+# ========== 過期日期不顯示 ==========
 def get_available_dates(year, month):
     """取得可預約日期（排除週五和已過期的日期）"""
     dates = []
@@ -70,11 +69,9 @@ def get_available_dates(year, month):
     for day in range(1, days_in_month + 1):
         date_obj = datetime(year, month, day)
         
-        # 檢查是否為營業日（週五公休）
         if not is_business_day(date_obj):
             continue
         
-        # 檢查是否過期（今天的日期之前的都不顯示）
         if date_obj < today:
             continue
             
@@ -82,36 +79,44 @@ def get_available_dates(year, month):
     return dates
 # ==========================================
 
+# ========== 過期時段不顯示（今天已過時間不出現）==========
 def get_available_slots(date_str):
+    """產生可預約時段（排除已過期時段和已預約時段）"""
     slots = []
     for hour in range(14, 21):
         slots.append(f"{hour:02d}:00")
     
+    # 檢查是否為今天
+    today = datetime.now().strftime("%Y-%m-%d")
+    current_hour = datetime.now().hour
+    
+    # 如果是今天，過去的時段不要顯示
+    if date_str == today:
+        slots = [s for s in slots if int(s[:2]) > current_hour]
+    
+    # 扣除已預約的時段
     booked = [a["time"] for a in appointments_db 
               if a["date"] == date_str and a["status"] == "confirmed"]
     
     return [s for s in slots if s not in booked]
+# ==========================================
 
-# ========== 修改3：完整防呆（同一天同時段不能重複）==========
 def check_duplicate_appointment(user_id, name, phone, date_str, time_str):
     """完整防呆檢查 - 防止重複預約"""
     for a in appointments_db:
         if a["status"] != "confirmed":
             continue
         
-        # 檢查1: 同 LINE 使用者、同日期、同時段
         if (a["user_id"] == user_id and 
             a["date"] == date_str and 
             a["time"] == time_str):
             return True, "❌ 您已經在這個時段有預約了！"
         
-        # 檢查2: 同手機、同日期、同時段（防止用不同帳號）
         if (a["customer_phone"] == phone and 
             a["date"] == date_str and 
             a["time"] == time_str):
             return True, "❌ 這個手機號碼已經在相同時段有預約了！"
     
-    # 檢查3: 同一天同一個使用者超過3筆預約
     same_day_count = sum(1 for x in appointments_db 
                         if x["user_id"] == user_id and 
                         x["date"] == date_str and 
@@ -120,7 +125,6 @@ def check_duplicate_appointment(user_id, name, phone, date_str, time_str):
         return True, "❌ 您同一天最多只能預約3個時段！"
     
     return False, None
-# ==========================================
 
 def write_to_google_sheets(appointment):
     """將預約資料寫入 Google Sheets"""
