@@ -543,10 +543,24 @@ def handle_postback(event):
         state["step"] = "waiting_month"
         user_state[user_id] = state
         
+        # ✅ 修改：過濾掉已過去的月份
+        now = get_taiwan_now()
         items = []
         for i in range(1, 13):
-            items.append(QuickReplyItem(action=PostbackAction(label=f"{i}月", data=f"month_{i}")))
-        send_reply(reply_token, TextMessage(text=f"請選擇 {year} 年月份：", quick_reply=QuickReply(items=items)))
+            # 如果選的年份已過去，不顯示任何月份（理論上不會發生，因為年份只顯示當年和明年）
+            if year < now.year:
+                break
+            # 如果是今年，跳過已過去的月份
+            if year == now.year and i < now.month:
+                continue
+            items.append(QuickReplyItem(action=PostbackAction(
+                label=f"{i}月", data=f"month_{i}"
+            )))
+        
+        send_reply(reply_token, TextMessage(
+            text=f"請選擇 {year} 年月份：",
+            quick_reply=QuickReply(items=items)
+        ))
     
     elif data.startswith("month_"):
         month = int(data.split("_")[1])
@@ -593,10 +607,23 @@ def handle_postback(event):
         for slot in slots:
             items.append(QuickReplyItem(action=PostbackAction(label=slot, data=f"time_{slot}")))
         
+        # ✅ 新增：返回選日期按鈕
+        items.append(QuickReplyItem(action=PostbackAction(
+            label="⬅️ 返回選日期",
+            data="back_to_date"
+        )))
+        
         send_reply(reply_token, TextMessage(
             text=f"📅 {date_str} {weekday}\n\n⏰ 營業時間：14:00-21:00\n\n請選擇時段：",
             quick_reply=QuickReply(items=items)
         ))
+    
+    # ✅ 新增：處理返回選日期
+    elif data == "back_to_date":
+        state = user_state.get(user_id, {})
+        state["step"] = "waiting_date"
+        user_state[user_id] = state
+        show_date_page(user_id, reply_token)
     
     elif data.startswith("time_"):
         time_str = data.split("_")[1]
