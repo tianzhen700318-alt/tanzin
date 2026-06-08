@@ -12,11 +12,23 @@ from linebot.v3.messaging import (
 from linebot.v3.webhooks import (
     MessageEvent, TextMessageContent, PostbackEvent
 )
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 import json
 import os
 import calendar
 import requests
+
+# ========== 設定台灣時區 ==========
+TAIWAN_TZ = timezone(timedelta(hours=8))
+
+def get_taiwan_now():
+    """取得台灣目前時間"""
+    return datetime.now(TAIWAN_TZ)
+
+def get_taiwan_today():
+    """取得台灣今天的日期（00:00:00）"""
+    return get_taiwan_now().replace(hour=0, minute=0, second=0, microsecond=0)
+# ==================================
 
 # ========== 從環境變數讀取 LINE 金鑰 ==========
 CHANNEL_SECRET = os.environ.get('LINE_CHANNEL_SECRET')
@@ -59,12 +71,12 @@ def save_data(data):
 def is_business_day(date_obj):
     return date_obj.weekday() != 4
 
-# ========== 過期日期不顯示 ==========
+# ========== 過期日期不顯示（使用台灣時區）==========
 def get_available_dates(year, month):
     """取得可預約日期（排除週五和已過期的日期）"""
     dates = []
     days_in_month = calendar.monthrange(year, month)[1]
-    today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    today = get_taiwan_today()
     
     for day in range(1, days_in_month + 1):
         date_obj = datetime(year, month, day)
@@ -79,16 +91,17 @@ def get_available_dates(year, month):
     return dates
 # ==========================================
 
-# ========== 過期時段不顯示（今天已過時間不出現）==========
+# ========== 過期時段不顯示（使用台灣時區）==========
 def get_available_slots(date_str):
     """產生可預約時段（排除已過期時段和已預約時段）"""
     slots = []
     for hour in range(14, 21):
         slots.append(f"{hour:02d}:00")
     
-    # 檢查是否為今天
-    today = datetime.now().strftime("%Y-%m-%d")
-    current_hour = datetime.now().hour
+    # 使用台灣時間
+    now = get_taiwan_now()
+    today = now.strftime("%Y-%m-%d")
+    current_hour = now.hour
     
     # 如果是今天，過去的時段不要顯示
     if date_str == today:
@@ -213,7 +226,7 @@ def create_appointment(user_id, name, phone, service_id, date_str, time_str):
         "date": date_str,
         "time": time_str,
         "status": "confirmed",
-        "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        "created_at": get_taiwan_now().strftime("%Y-%m-%d %H:%M:%S")
     }
     
     appointments_db.append(new_appointment)
@@ -519,7 +532,7 @@ def handle_postback(event):
         user_state[user_id] = {"step": "waiting_year", "service_id": service_id, "date_page": 0}
         
         items = []
-        current_year = datetime.now().year
+        current_year = get_taiwan_now().year
         for i in range(current_year, current_year + 2):
             items.append(QuickReplyItem(action=PostbackAction(label=f"{i}年", data=f"year_{i}")))
         send_reply(reply_token, TextMessage(text="請選擇年份：", quick_reply=QuickReply(items=items)))
@@ -539,7 +552,7 @@ def handle_postback(event):
     elif data.startswith("month_"):
         month = int(data.split("_")[1])
         state = user_state.get(user_id, {})
-        year = state.get("year", datetime.now().year)
+        year = state.get("year", get_taiwan_now().year)
         all_dates = get_available_dates(year, month)
         
         if not all_dates:
@@ -629,8 +642,8 @@ def handle_postback(event):
 def show_date_page(user_id, reply_token):
     state = user_state.get(user_id, {})
     all_dates = state.get("all_dates", [])
-    year = state.get("year", datetime.now().year)
-    month = state.get("month", datetime.now().month)
+    year = state.get("year", get_taiwan_now().year)
+    month = state.get("month", get_taiwan_now().month)
     current_page = state.get("date_page", 0)
     
     total_pages = (len(all_dates) + ITEMS_PER_PAGE - 1) // ITEMS_PER_PAGE
