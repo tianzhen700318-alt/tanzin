@@ -279,12 +279,54 @@ def handle_message(event):
     if user_id in user_state:
         state = user_state[user_id]
         
+        # ========== 整合版：支援「姓名 手機」一起填 ==========
         if state.get("step") == "waiting_name":
-            state["name"] = text
-            state["step"] = "waiting_phone"
-            user_state[user_id] = state
-            send_reply(reply_token, TextMessage(text=f"👤 姓名：{text}\n\n請輸入手機號碼："))
-            return
+            # 嘗試解析「姓名 手機」格式（用空格分開）
+            parts = text.strip().split()
+            
+            if len(parts) >= 2:
+                # 成功解析：第一部分是姓名，第二部分是手機
+                state["name"] = parts[0]
+                state["phone"] = parts[1]
+                
+                # 直接建立預約（跳過 waiting_phone 步驟）
+                apt_id, error = create_appointment(
+                    user_id, state["name"], state["phone"],
+                    state["service_id"], state["selected_date"], state["selected_time"]
+                )
+                
+                if error:
+                    send_reply(reply_token, TextMessage(text=f"❌ {error}\n\n請重新選擇"))
+                    del user_state[user_id]
+                    return
+                
+                service = SERVICES[state["service_id"]]
+                weekday = get_weekday_name(state["selected_date"])
+                
+                send_reply(reply_token, TextMessage(
+                    text=f"✅ 預約成功！\n\n"
+                         f"📌 預約編號：{apt_id}\n"
+                         f"📅 日期：{state['selected_date']} {weekday}\n"
+                         f"⏰ 時間：{state['selected_time']}\n"
+                         f"💆 服務：{service['name']}\n"
+                         f"💰 費用：${service['price']}\n"
+                         f"👤 姓名：{state['name']}\n"
+                         f"📞 手機：{state['phone']}\n"
+                         f"⚠️ 請準時抵達，取消請提前告知"
+                ))
+                del user_state[user_id]
+                return
+            else:
+                # 沒有空格，當作只有姓名，進入傳統流程
+                state["name"] = text
+                state["step"] = "waiting_phone"
+                user_state[user_id] = state
+                send_reply(reply_token, TextMessage(
+                    text=f"👤 姓名：{text}\n\n"
+                         f"⚠️ 提示：您也可以一次輸入「姓名 手機」（中間空格）\n\n"
+                         f"請輸入手機號碼："
+                ))
+                return
         
         elif state.get("step") == "waiting_phone":
             state["phone"] = text
@@ -517,7 +559,14 @@ def handle_postback(event):
         state["selected_time"] = time_str
         state["step"] = "waiting_name"
         user_state[user_id] = state
-        send_reply(reply_token, TextMessage(text=f"⏰ 時段：{time_str}\n\n請輸入您的姓名："))
+        # 更新提示訊息，支援一起填寫
+        send_reply(reply_token, TextMessage(
+            text=f"⏰ 時段：{time_str}\n\n"
+                 f"請輸入您的姓名和手機號碼\n\n"
+                 f"📝 分開輸入：先輸入姓名，再輸入手機\n"
+                 f"⚡ 快速輸入：姓名 手機（中間空格）\n\n"
+                 f"範例：王小明 0912345678"
+        ))
     
     elif data.startswith("cancel_"):
         apt_id = int(data.split("_")[1])
