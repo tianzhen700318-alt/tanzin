@@ -18,17 +18,16 @@ import os
 import calendar
 import requests
 
-# ========== 設定台灣時區 ==========
-TAIWAN_TZ = timezone(timedelta(hours=8))
-
+# ========== 設定台灣時區輔助函數 ==========
 def get_taiwan_now():
-    """取得台灣目前時間"""
-    return datetime.now(TAIWAN_TZ)
+    """取得台灣目前時間（不帶時區）"""
+    tz = timezone(timedelta(hours=8))
+    return datetime.now(tz).replace(tzinfo=None)
 
 def get_taiwan_today():
-    """取得台灣今天的日期（00:00:00）"""
+    """取得台灣今天的日期（00:00:00，不帶時區）"""
     return get_taiwan_now().replace(hour=0, minute=0, second=0, microsecond=0)
-# ==================================
+# ==========================================
 
 # ========== 從環境變數讀取 LINE 金鑰 ==========
 CHANNEL_SECRET = os.environ.get('LINE_CHANNEL_SECRET')
@@ -71,7 +70,7 @@ def save_data(data):
 def is_business_day(date_obj):
     return date_obj.weekday() != 4
 
-# ========== 過期日期不顯示（使用台灣時區）==========
+# ========== 過期日期不顯示 ==========
 def get_available_dates(year, month):
     """取得可預約日期（排除週五和已過期的日期）"""
     dates = []
@@ -91,7 +90,7 @@ def get_available_dates(year, month):
     return dates
 # ==========================================
 
-# ========== 過期時段不顯示（使用台灣時區）==========
+# ========== 過期時段不顯示 ==========
 def get_available_slots(date_str):
     """產生可預約時段（排除已過期時段和已預約時段）"""
     slots = []
