@@ -16,18 +16,18 @@ from datetime import datetime
 import json
 import os
 import calendar
-import requests  # 新增：用於 Google Sheets
+import requests
 
 # ========== 從環境變數讀取 LINE 金鑰 ==========
 CHANNEL_SECRET = os.environ.get('LINE_CHANNEL_SECRET')
 CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN')
 
-# 店家 LINE ID
+# 店家 LINE ID（多個用逗號分隔）
+# 範例：ADMIN_USER_IDS = "Uaaaaa,Ubbbbb,Uccccc"
 admin_ids_str = os.environ.get('ADMIN_USER_IDS', '')
 ADMIN_USER_IDS = [uid.strip() for uid in admin_ids_str.split(',') if uid.strip()]
 
-# ========== Google Sheets 設定 ==========
-# 請將下面的網址替換成你部署的 Google Apps Script 網址
+# Google Sheets 設定
 GOOGLE_SHEETS_URL = os.environ.get('GOOGLE_SHEETS_URL', '')
 # ==========================================
 
@@ -41,7 +41,7 @@ SERVICES = {
     "2": {"name": "局部紓壓", "price": 800, "duration": 30, "emoji": "💪"}
 }
 
-# 使用記憶體儲存（不用檔案）
+# 使用記憶體儲存
 appointments_db = []
 next_id = 1
 ITEMS_PER_PAGE = 10
@@ -60,14 +60,27 @@ def save_data(data):
 def is_business_day(date_obj):
     return date_obj.weekday() != 4
 
+# ========== 修改1：過期日期不顯示 ==========
 def get_available_dates(year, month):
+    """取得可預約日期（排除週五和已過期的日期）"""
     dates = []
     days_in_month = calendar.monthrange(year, month)[1]
+    today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    
     for day in range(1, days_in_month + 1):
         date_obj = datetime(year, month, day)
-        if is_business_day(date_obj):
-            dates.append(date_obj.strftime("%Y-%m-%d"))
+        
+        # 檢查是否為營業日（週五公休）
+        if not is_business_day(date_obj):
+            continue
+        
+        # 檢查是否過期（今天的日期之前的都不顯示）
+        if date_obj < today:
+            continue
+            
+        dates.append(date_obj.strftime("%Y-%m-%d"))
     return dates
+# ==========================================
 
 def get_available_slots(date_str):
     slots = []
@@ -79,21 +92,26 @@ def get_available_slots(date_str):
     
     return [s for s in slots if s not in booked]
 
+# ========== 修改3：完整防呆（同一天同時段不能重複）==========
 def check_duplicate_appointment(user_id, name, phone, date_str, time_str):
+    """完整防呆檢查 - 防止重複預約"""
     for a in appointments_db:
         if a["status"] != "confirmed":
             continue
         
+        # 檢查1: 同 LINE 使用者、同日期、同時段
         if (a["user_id"] == user_id and 
             a["date"] == date_str and 
             a["time"] == time_str):
             return True, "❌ 您已經在這個時段有預約了！"
         
+        # 檢查2: 同手機、同日期、同時段（防止用不同帳號）
         if (a["customer_phone"] == phone and 
             a["date"] == date_str and 
             a["time"] == time_str):
             return True, "❌ 這個手機號碼已經在相同時段有預約了！"
     
+    # 檢查3: 同一天同一個使用者超過3筆預約
     same_day_count = sum(1 for x in appointments_db 
                         if x["user_id"] == user_id and 
                         x["date"] == date_str and 
@@ -102,8 +120,8 @@ def check_duplicate_appointment(user_id, name, phone, date_str, time_str):
         return True, "❌ 您同一天最多只能預約3個時段！"
     
     return False, None
+# ==========================================
 
-# ========== 新增：寫入 Google Sheets ==========
 def write_to_google_sheets(appointment):
     """將預約資料寫入 Google Sheets"""
     if not GOOGLE_SHEETS_URL:
@@ -141,7 +159,6 @@ def write_to_google_sheets(appointment):
     except Exception as e:
         print(f"⚠️ 寫入 Google Sheets 例外: {e}")
         return False
-# ==========================================
 
 def send_admin_notification(apt_id, name, phone, service_name, service_price, date_str, time_str):
     weekday = get_weekday_name(date_str)
@@ -200,10 +217,7 @@ def create_appointment(user_id, name, phone, service_id, date_str, time_str):
     next_id += 1
     
     send_admin_notification(current_id, name, phone, service["name"], service["price"], date_str, time_str)
-    
-    # ========== 新增：寫入 Google Sheets ==========
     write_to_google_sheets(new_appointment)
-    # ===========================================
     
     return current_id, None
 
@@ -328,17 +342,13 @@ def handle_message(event):
     if user_id in user_state:
         state = user_state[user_id]
         
-        # ========== 只支援「姓名 手機」一起填 ==========
         if state.get("step") == "waiting_name":
-            # 解析「姓名 手機」格式（用空格分開）
             parts = text.strip().split()
             
             if len(parts) >= 2:
-                # 成功解析：第一部分是姓名，第二部分是手機
                 state["name"] = parts[0]
                 state["phone"] = parts[1]
                 
-                # 直接建立預約
                 apt_id, error = create_appointment(
                     user_id, state["name"], state["phone"],
                     state["service_id"], state["selected_date"], state["selected_time"]
@@ -366,7 +376,6 @@ def handle_message(event):
                 del user_state[user_id]
                 return
             else:
-                # 格式錯誤，重新輸入
                 send_reply(reply_token, TextMessage(
                     text="❌ 請輸入正確格式\n\n"
                          "請輸入您的姓名和手機號碼，中間用空格隔開\n\n"
@@ -375,7 +384,6 @@ def handle_message(event):
                 return
         
         elif state.get("step") == "waiting_phone":
-            # 不再使用這個步驟
             pass
         
         elif state.get("step") == "admin_waiting_year":
@@ -473,7 +481,7 @@ def handle_message(event):
             ))
         else:
             send_reply(reply_token, TextMessage(
-                text=f"⛔ 無權限\n\n您的 LINE ID：{user_id}"
+                text=f"⛔ 無權限\n\n您的 LINE ID：{user_id}\n\n如需開通權限，請聯絡管理員"
             ))
     
     else:
@@ -531,7 +539,7 @@ def handle_postback(event):
         all_dates = get_available_dates(year, month)
         
         if not all_dates:
-            send_reply(reply_token, TextMessage(text="該月份無營業日（週五公休）"))
+            send_reply(reply_token, TextMessage(text="該月份無營業日（週五公休）或無可預約日期"))
             return
         
         state["all_dates"] = all_dates
