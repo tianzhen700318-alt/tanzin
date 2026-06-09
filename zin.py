@@ -163,7 +163,7 @@ def get_all_appointments():
 
 # ========== 業務邏輯函數 ==========
 def is_business_day(date_obj):
-    return date_obj.weekday() != 4
+    return date_obj.weekday() != 4  # 週五公休
 
 def get_available_dates(year, month):
     dates = []
@@ -337,6 +337,13 @@ def show_date_page(user_id, reply_token):
     month = state.get("month", datetime.now().month)
     current_page = state.get("date_page", 0)
     
+    # 如果沒有日期，顯示錯誤並清除狀態
+    if not all_dates:
+        send_reply(reply_token, TextMessage(text="該月份無營業日（週五公休）"))
+        if user_id in user_state:
+            del user_state[user_id]
+        return
+    
     total_pages = (len(all_dates) + ITEMS_PER_PAGE - 1) // ITEMS_PER_PAGE
     start_idx = current_page * ITEMS_PER_PAGE
     end_idx = min(start_idx + ITEMS_PER_PAGE, len(all_dates))
@@ -351,6 +358,7 @@ def show_date_page(user_id, reply_token):
             data=f"date_{d}"
         )))
     
+    # 添加分頁按鈕
     if current_page > 0:
         items.append(QuickReplyItem(action=PostbackAction(
             label="⬅️ 上一頁", 
@@ -362,6 +370,13 @@ def show_date_page(user_id, reply_token):
             label="➡️ 下一頁", 
             data=f"date_page_{current_page + 1}"
         )))
+    
+    # 確保 items 不是空的
+    if not items:
+        send_reply(reply_token, TextMessage(text="暫無可預約日期"))
+        if user_id in user_state:
+            del user_state[user_id]
+        return
     
     send_reply(reply_token, TextMessage(
         text=f"📅 {year}年{month}月\n\n共 {len(all_dates)} 天（第{current_page + 1}/{total_pages}頁）\n\n請選擇日期：",
@@ -392,6 +407,8 @@ def handle_message(event):
     user_id = event.source.user_id
     reply_token = event.reply_token
     text = event.message.text.strip()
+    
+    print(f"收到訊息 - 用戶: {user_id}, 內容: {text}")
     
     if user_id in user_state:
         state = user_state[user_id]
@@ -458,9 +475,13 @@ def handle_message(event):
             return
     
     if text == "我要預約":
+        items = get_service_buttons()
+        if not items:
+            send_reply(reply_token, TextMessage(text="系統錯誤，請稍後再試"))
+            return
         send_reply(reply_token, TextMessage(
             text="🧠 頭薦骨調理預約系統\n\n⚠️ 注意：每個手機號碼僅限預約一次！\n\n請選擇服務項目：",
-            quick_reply=QuickReply(items=get_service_buttons())
+            quick_reply=QuickReply(items=items)
         ))
     elif text == "我的預約":
         apps = get_user_appointments(user_id)
@@ -483,6 +504,9 @@ def handle_message(event):
                     label=f"取消 {a['date'][5:]} {a['time']}",
                     data=f"cancel_{a['id']}"
                 )))
+            if not items:
+                send_reply(reply_token, TextMessage(text="沒有可取消的預約"))
+                return
             send_reply(reply_token, TextMessage(
                 text="請選擇要取消的預約：",
                 quick_reply=QuickReply(items=items)
@@ -501,14 +525,15 @@ def handle_message(event):
         else:
             send_reply(reply_token, TextMessage(text=f"⛔ 無權限"))
     else:
+        items = [
+            QuickReplyItem(action=MessageAction(label="📅 我要預約", text="我要預約")),
+            QuickReplyItem(action=MessageAction(label="📋 我的預約", text="我的預約")),
+            QuickReplyItem(action=MessageAction(label="❌ 取消查詢", text="取消查詢")),
+            QuickReplyItem(action=MessageAction(label="🔐 店家後台", text="店家後台"))
+        ]
         send_reply(reply_token, TextMessage(
-            text="🧠 頭薦骨調理預約系統\n\n✅ 輸入「我要預約」開始\n✅ 輸入「我的預約」查詢\n✅ 輸入「取消查詢」取消",
-            quick_reply=QuickReply(items=[
-                QuickReplyItem(action=MessageAction(label="📅 我要預約", text="我要預約")),
-                QuickReplyItem(action=MessageAction(label="📋 我的預約", text="我的預約")),
-                QuickReplyItem(action=MessageAction(label="❌ 取消查詢", text="取消查詢")),
-                QuickReplyItem(action=MessageAction(label="🔐 店家後台", text="店家後台"))
-            ])
+            text="🧠 頭薦骨調理預約系統\n\n📅 營業時間：14:00 - 21:00\n📴 公休日：每週五\n⚠️ 每個手機號碼僅限預約一次\n\n✅ 輸入「我要預約」開始\n✅ 輸入「我的預約」查詢\n✅ 輸入「取消查詢」取消",
+            quick_reply=QuickReply(items=items)
         ))
 
 @handler.add(PostbackEvent)
@@ -517,6 +542,8 @@ def handle_postback(event):
     reply_token = event.reply_token
     data = event.postback.data
 
+    print(f"收到 Postback - 用戶: {user_id}, 數據: {data}")
+
     if data.startswith("service_"):
         service_id = data.split("_")[1]
         user_state[user_id] = {"step": "waiting_year", "service_id": service_id, "date_page": 0}
@@ -524,7 +551,13 @@ def handle_postback(event):
         current_year = datetime.now().year
         for i in range(current_year, current_year + 2):
             items.append(QuickReplyItem(action=PostbackAction(label=f"{i}年", data=f"year_{i}")))
-        send_reply(reply_token, TextMessage(text="請選擇年份：", quick_reply=QuickReply(items=items)))
+        if not items:
+            send_reply(reply_token, TextMessage(text="系統錯誤，請稍後再試"))
+            return
+        send_reply(reply_token, TextMessage(
+            text="請選擇年份：", 
+            quick_reply=QuickReply(items=items)
+        ))
     elif data.startswith("year_"):
         year = int(data.split("_")[1])
         state = user_state.get(user_id, {})
@@ -532,7 +565,13 @@ def handle_postback(event):
         state["step"] = "waiting_month"
         user_state[user_id] = state
         items = [QuickReplyItem(action=PostbackAction(label=f"{i}月", data=f"month_{i}")) for i in range(1, 13)]
-        send_reply(reply_token, TextMessage(text=f"請選擇 {year} 年月份：", quick_reply=QuickReply(items=items)))
+        if not items:
+            send_reply(reply_token, TextMessage(text="系統錯誤，請稍後再試"))
+            return
+        send_reply(reply_token, TextMessage(
+            text=f"請選擇 {year} 年月份：", 
+            quick_reply=QuickReply(items=items)
+        ))
     elif data.startswith("month_"):
         month = int(data.split("_")[1])
         state = user_state.get(user_id, {})
@@ -540,6 +579,8 @@ def handle_postback(event):
         all_dates = get_available_dates(year, month)
         if not all_dates:
             send_reply(reply_token, TextMessage(text="該月份無營業日（週五公休）"))
+            if user_id in user_state:
+                del user_state[user_id]
             return
         state["all_dates"] = all_dates
         state["month"] = month
@@ -567,8 +608,11 @@ def handle_postback(event):
         user_state[user_id] = state
         weekday = get_weekday_name(date_str)
         items = [QuickReplyItem(action=PostbackAction(label=slot, data=f"time_{slot}")) for slot in slots]
+        if not items:
+            send_reply(reply_token, TextMessage(text="當日已無可預約時段"))
+            return
         send_reply(reply_token, TextMessage(
-            text=f"📅 {date_str} {weekday}\n\n請選擇時段：",
+            text=f"📅 {date_str} {weekday}\n\n⏰ 營業時間：14:00-21:00\n\n請選擇時段：",
             quick_reply=QuickReply(items=items)
         ))
     elif data.startswith("time_"):
