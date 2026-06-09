@@ -51,7 +51,7 @@ SERVICES = {
     "2": {"name": "局部紓壓", "price": 800, "duration": 30, "emoji": "💪"}
 }
 
-# 使用記憶體儲存
+# 使用記憶體儲存（僅作為暫存）
 appointments_db = []
 next_id = 1
 ITEMS_PER_PAGE = 10
@@ -106,38 +106,60 @@ def get_available_slots(date_str):
     if date_str == today:
         slots = [s for s in slots if int(s[:2]) > current_hour]
     
-    # 扣除已預約的時段
-    booked = [a["time"] for a in appointments_db 
-              if a["date"] == date_str and a["status"] == "confirmed"]
+    # 扣除已預約的時段（從 Google Sheets 檢查）
+    booked = []
+    if GOOGLE_SHEETS_URL:
+        try:
+            response = requests.get(GOOGLE_SHEETS_URL, timeout=10)
+            result = response.json()
+            if result.get('success'):
+                appointments = result.get('data', [])
+                booked = [a["time"] for a in appointments 
+                         if a["date"] == date_str]
+        except:
+            pass
     
     return [s for s in slots if s not in booked]
 # ==========================================
 
+# ========== 防呆檢查（從 Google Sheets 讀取）==========
 def check_duplicate_appointment(user_id, name, phone, date_str, time_str):
-    """完整防呆檢查 - 防止重複預約"""
-    for a in appointments_db:
-        if a["status"] != "confirmed":
-            continue
-        
-        if (a["user_id"] == user_id and 
-            a["date"] == date_str and 
-            a["time"] == time_str):
-            return True, "❌ 您已經在這個時段有預約了！"
-        
-        if (a["customer_phone"] == phone and 
-            a["date"] == date_str and 
-            a["time"] == time_str):
-            return True, "❌ 這個手機號碼已經在相同時段有預約了！"
+    """從 Google Sheets 檢查是否重複預約"""
+    if not GOOGLE_SHEETS_URL:
+        return False, None
     
-    same_day_count = sum(1 for x in appointments_db 
-                        if x["user_id"] == user_id and 
-                        x["date"] == date_str and 
-                        x["status"] == "confirmed")
-    if same_day_count >= 3:
-        return True, "❌ 您同一天最多只能預約3個時段！"
-    
-    return False, None
+    try:
+        response = requests.get(GOOGLE_SHEETS_URL, timeout=10)
+        result = response.json()
+        
+        if not result.get('success'):
+            return False, None
+        
+        appointments = result.get('data', [])
+        
+        for a in appointments:
+            # 檢查同 LINE 使用者、同日期、同時段
+            if a.get('user_id') == user_id and a.get('date') == date_str and a.get('time') == time_str:
+                return True, "❌ 您已經在這個時段有預約了！"
+            
+            # 檢查同手機、同日期、同時段
+            if a.get('phone') == phone and a.get('date') == date_str and a.get('time') == time_str:
+                return True, "❌ 這個手機號碼已經在相同時段有預約了！"
+        
+        # 檢查同一天同一個使用者超過3筆
+        same_day_count = sum(1 for a in appointments 
+                            if a.get('user_id') == user_id and a.get('date') == date_str)
+        if same_day_count >= 3:
+            return True, "❌ 您同一天最多只能預約3個時段！"
+        
+        return False, None
+        
+    except Exception as e:
+        print(f"⚠️ 檢查失敗: {e}")
+        return False, None
+# ==========================================
 
+# ========== 寫入 Google Sheets ==========
 def write_to_google_sheets(appointment):
     """將預約資料寫入 Google Sheets"""
     if not GOOGLE_SHEETS_URL:
@@ -148,6 +170,7 @@ def write_to_google_sheets(appointment):
         weekday = get_weekday_name(appointment["date"])
         
         data = {
+            "user_id": appointment["user_id"],
             "id": appointment["id"],
             "date": appointment["date"],
             "weekday": weekday,
@@ -170,11 +193,12 @@ def write_to_google_sheets(appointment):
             print(f"✅ 已寫入 Google Sheets - 預約編號: {appointment['id']}")
             return True
         else:
-            print(f"⚠️ 寫入 Google Sheets 失敗: {response.text}")
+            print(f"⚠️ 寫入失敗: {response.text}")
             return False
     except Exception as e:
-        print(f"⚠️ 寫入 Google Sheets 例外: {e}")
+        print(f"⚠️ 寫入例外: {e}")
         return False
+# ==========================================
 
 def send_admin_notification(apt_id, name, phone, service_name, service_price, date_str, time_str):
     weekday = get_weekday_name(date_str)
@@ -207,11 +231,25 @@ def send_admin_notification(apt_id, name, phone, service_name, service_price, da
 def create_appointment(user_id, name, phone, service_id, date_str, time_str):
     global next_id, appointments_db
     
+    # 從 Google Sheets 檢查是否重複
     is_duplicate, error_msg = check_duplicate_appointment(user_id, name, phone, date_str, time_str)
     if is_duplicate:
         return None, error_msg
     
     service = SERVICES[service_id]
+    
+    # 從 Google Sheets 取得下一個 ID
+    next_id = 1
+    if GOOGLE_SHEETS_URL:
+        try:
+            response = requests.get(GOOGLE_SHEETS_URL, timeout=10)
+            result = response.json()
+            if result.get('success'):
+                appointments = result.get('data', [])
+                if appointments:
+                    next_id = max(int(a.get('id', 0)) for a in appointments) + 1
+        except:
+            pass
     
     new_appointment = {
         "id": next_id,
@@ -230,7 +268,6 @@ def create_appointment(user_id, name, phone, service_id, date_str, time_str):
     
     appointments_db.append(new_appointment)
     current_id = next_id
-    next_id += 1
     
     send_admin_notification(current_id, name, phone, service["name"], service["price"], date_str, time_str)
     write_to_google_sheets(new_appointment)
@@ -238,9 +275,22 @@ def create_appointment(user_id, name, phone, service_id, date_str, time_str):
     return current_id, None
 
 def get_user_appointments(user_id):
-    return [a for a in appointments_db if a["user_id"] == user_id and a["status"] == "confirmed"]
+    """從 Google Sheets 讀取使用者的預約"""
+    if not GOOGLE_SHEETS_URL:
+        return []
+    
+    try:
+        response = requests.get(GOOGLE_SHEETS_URL, timeout=10)
+        result = response.json()
+        if result.get('success'):
+            appointments = result.get('data', [])
+            return [a for a in appointments if a.get('user_id') == user_id]
+        return []
+    except:
+        return []
 
 def cancel_appointment(user_id, apt_id):
+    """取消預約（僅從記憶體，主要還是靠 Google Sheets）"""
     global appointments_db
     for a in appointments_db:
         if a["id"] == apt_id and a["user_id"] == user_id and a["status"] == "confirmed":
@@ -490,12 +540,11 @@ def handle_message(event):
         else:
             msg = "📋 您的預約：\n\n"
             for a in apps:
-                weekday = get_weekday_name(a["date"])
                 msg += f"🔹 編號 {a['id']}\n"
-                msg += f"   📅 {a['date']} {weekday}\n"
+                msg += f"   📅 {a['date']} {a['weekday']}\n"
                 msg += f"   ⏰ {a['time']}\n"
-                msg += f"   💆 {a['service_name']}\n"
-                msg += f"   💰 ${a['service_price']}\n\n"
+                msg += f"   💆 {a['service']}\n"
+                msg += f"   💰 ${a['price']}\n\n"
             send_reply(reply_token, TextMessage(text=msg))
     
     elif text == "取消查詢":
