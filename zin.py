@@ -27,6 +27,13 @@ def get_taiwan_now():
 def get_taiwan_today():
     """取得台灣今天的日期（00:00:00，不帶時區）"""
     return get_taiwan_now().replace(hour=0, minute=0, second=0, microsecond=0)
+
+def normalize_time(t):
+    """將時間格式統一為 'HH:MM'"""
+    t = str(t).strip()
+    if len(t) > 5:
+        t = t[:5]
+    return t
 # ==========================================
 
 # ========== 從環境變數讀取 LINE 金鑰 ==========
@@ -90,9 +97,9 @@ def get_available_dates(year, month):
     return dates
 # ==========================================
 
-# ========== 新時段（1.5小時/間隔半小時緩衝）==========
+# ========== 修改1：強化 get_available_slots ==========
 def get_available_slots(date_str):
-    """產生可預約時段（1.5小時為單位，間隔半小時緩衝）"""
+    """產生可預約時段（排除已過期時段和已預約時段）"""
     slots = [
         "14:00",  # 14:00 - 15:30
         "15:30",  # 15:30 - 17:00
@@ -110,24 +117,86 @@ def get_available_slots(date_str):
     if date_str == today:
         slots = [s for s in slots if s > current_time]
     
-    # 從記憶體讀取已預約時段
-    booked = [a["time"] for a in appointments_db 
-              if a["date"] == date_str and a["status"] == "confirmed"]
+    booked = set()
     
-    # 同時從 Google Sheets 讀取（確保同步）
+    # 從記憶體讀取已預約時段（本地備援）
+    for a in appointments_db:
+        if a["date"] == date_str and a["status"] == "confirmed":
+            booked.add(a["time"])
+    
+    # 從 Google Sheets 讀取已預約時段（主要來源）
     if GOOGLE_SHEETS_URL:
         try:
             response = requests.get(GOOGLE_SHEETS_URL, timeout=10)
             result = response.json()
             if result.get('success'):
-                appointments = result.get('data', [])
-                gs_booked = [a["time"] for a in appointments 
-                            if a["date"] == date_str]
-                booked = list(set(booked + gs_booked))
+                for a in result.get('data', []):
+                    if a.get('date') == date_str:
+                        t = normalize_time(a.get('time', ''))
+                        if t:
+                            booked.add(t)
         except Exception as e:
             print(f"⚠️ 讀取 Google Sheets 失敗: {e}")
     
     return [s for s in slots if s not in booked]
+# ==========================================
+
+# ========== 修改2：強化 check_duplicate_appointment（包含正規化）==========
+def check_duplicate_appointment(user_id, name, phone, date_str, time_str):
+    """從 Google Sheets 直接讀取檢查是否重複預約"""
+    if not GOOGLE_SHEETS_URL:
+        return False, None
+    
+    try:
+        response = requests.get(GOOGLE_SHEETS_URL, timeout=10)
+        
+        if response.status_code != 200:
+            print(f"⚠️ 讀取 Google Sheets 失敗: HTTP {response.status_code}")
+            return False, None
+        
+        result = response.json()
+        
+        if not result.get('success'):
+            print(f"⚠️ Google Sheets 回傳錯誤: {result.get('error')}")
+            return False, None
+        
+        appointments = result.get('data', [])
+        
+        # ✅ 第1關：同日期 + 同時段 → 不管是誰，一律拒絕
+        for a in appointments:
+            a_date = str(a.get('date', '')).strip()
+            a_time = normalize_time(a.get('time', ''))
+            if a_date == date_str and a_time == time_str:
+                return True, f"❌ {date_str} {time_str} 這個時段已經被預約了！請選擇其他時段。"
+        
+        # ✅ 第2關：同手機號碼 + 同時段
+        for a in appointments:
+            a_phone = str(a.get('phone', '')).strip()
+            a_date = str(a.get('date', '')).strip()
+            a_time = normalize_time(a.get('time', ''))
+            if a_phone == phone and a_date == date_str and a_time == time_str:
+                return True, "❌ 這個手機號碼已經在這個時段有預約了！"
+        
+        # ✅ 第3關：同 LINE 帳號 + 同時段
+        for a in appointments:
+            a_user_id = str(a.get('user_id', '')).strip()
+            a_date = str(a.get('date', '')).strip()
+            a_time = normalize_time(a.get('time', ''))
+            if a_user_id == user_id and a_date == date_str and a_time == time_str:
+                return True, "❌ 您已經在這個時段有預約了！"
+        
+        # ✅ 第4關：同一天同一個使用者超過3筆
+        same_day_count = sum(1 for a in appointments 
+                            if str(a.get('user_id', '')).strip() == user_id and 
+                            str(a.get('date', '')).strip() == date_str)
+        if same_day_count >= 3:
+            return True, "❌ 您同一天最多只能預約3個時段！"
+        
+        return False, None
+        
+    except Exception as e:
+        print(f"⚠️ 檢查失敗: {e}")
+        return False, None
 # ==========================================
 
 # ========== 寫入 Google Sheets ==========
@@ -208,42 +277,14 @@ def send_admin_notification(apt_id, name, phone, service_name, service_price, da
 def create_appointment(user_id, name, phone, service_id, date_str, time_str):
     global next_id, appointments_db
     
-    # ========== 完整防呆檢查（從 Google Sheets 讀取）==========
-    if GOOGLE_SHEETS_URL:
-        try:
-            response = requests.get(GOOGLE_SHEETS_URL, timeout=10)
-            if response.status_code == 200:
-                result = response.json()
-                if result.get('success'):
-                    appointments = result.get('data', [])
-                    
-                    # ✅ 第1關：檢查這個時段是否已經被【任何人】預約了
-                    for a in appointments:
-                        if a.get('date') == date_str and a.get('time') == time_str:
-                            return None, f"❌ {date_str} {time_str} 這個時段已經被預約了！請選擇其他時段。"
-                    
-                    # ✅ 第2關：檢查同手機號碼 + 同時段
-                    for a in appointments:
-                        if a.get('phone') == phone and a.get('date') == date_str and a.get('time') == time_str:
-                            return None, "❌ 這個手機號碼已經在這個時段有預約了！"
-                    
-                    # ✅ 第3關：檢查同 LINE 帳號 + 同時段
-                    for a in appointments:
-                        if a.get('user_id') == user_id and a.get('date') == date_str and a.get('time') == time_str:
-                            return None, "❌ 您已經在這個時段有預約了！"
-                    
-                    # ✅ 第4關：檢查同一天同一個使用者超過3筆
-                    same_day_count = sum(1 for a in appointments 
-                                        if a.get('user_id') == user_id and a.get('date') == date_str)
-                    if same_day_count >= 3:
-                        return None, "❌ 您同一天最多只能預約3個時段！"
-        except Exception as e:
-            print(f"⚠️ 檢查失敗: {e}")
-    # ======================================================
+    # 從 Google Sheets 檢查是否重複
+    is_duplicate, error_msg = check_duplicate_appointment(user_id, name, phone, date_str, time_str)
+    if is_duplicate:
+        return None, error_msg
     
     service = SERVICES[service_id]
     
-    # 取得下一個 ID
+    # 從 Google Sheets 取得下一個 ID
     next_id = 1
     if GOOGLE_SHEETS_URL:
         try:
@@ -528,7 +569,7 @@ def handle_message(event):
         welcome_msg = (
             "🧠 頭薦骨調理預約系統\n\n"
             "📅 營業時間：14:00 - 21:30\n"
-            "⏰ 每1小時一個時段\n"
+            "⏰ 每1.5小時一個時段\n"
             "📴 公休日：每週五\n\n"
             "請選擇服務項目："
         )
