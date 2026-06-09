@@ -12,10 +12,25 @@ from linebot.v3.messaging import (
 from linebot.v3.webhooks import (
     MessageEvent, TextMessageContent, PostbackEvent
 )
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 import json
 import os
 import calendar
+
+# ========== 台灣時區 ==========
+def get_taiwan_now():
+    tz = timezone(timedelta(hours=8))
+    return datetime.now(tz).replace(tzinfo=None)
+
+def get_taiwan_today():
+    now = get_taiwan_now()
+    return now.replace(hour=0, minute=0, second=0, microsecond=0)
+
+def get_weekday_name(date_str):
+    date_obj = datetime.strptime(date_str, "%Y-%m-%d")
+    weekdays = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
+    return weekdays[date_obj.weekday()]
+# ==================================
 
 # ========== 從環境變數讀取 LINE 金鑰 ==========
 CHANNEL_SECRET = os.environ.get('LINE_CHANNEL_SECRET')
@@ -32,17 +47,17 @@ handler = WebhookHandler(CHANNEL_SECRET)
 
 # 服務項目
 SERVICES = {
-    "1": {"name": "健康調理", "price": 1500, "duration": 60, "emoji": "💆"},
+    "1": {"name": "健康調理", "price": 1500, "duration": 90, "emoji": "💆"},
     "2": {"name": "局部紓壓", "price": 800, "duration": 30, "emoji": "💪"}
 }
 
-# 使用記憶體儲存（不用檔案）
+# 使用記憶體儲存
 appointments_db = []
 next_id = 1
 ITEMS_PER_PAGE = 10
 
 def init_db():
-    pass  # 不需要初始化
+    pass
 
 def load_data():
     return {"appointments": appointments_db, "next_id": next_id}
@@ -56,18 +71,29 @@ def is_business_day(date_obj):
     return date_obj.weekday() != 4
 
 def get_available_dates(year, month):
+    """取得可預約日期（排除週五和已過期的日期）"""
     dates = []
     days_in_month = calendar.monthrange(year, month)[1]
+    today = get_taiwan_today()
+    
     for day in range(1, days_in_month + 1):
         date_obj = datetime(year, month, day)
-        if is_business_day(date_obj):
-            dates.append(date_obj.strftime("%Y-%m-%d"))
+        if not is_business_day(date_obj):
+            continue
+        if date_obj < today:
+            continue
+        dates.append(date_obj.strftime("%Y-%m-%d"))
     return dates
 
 def get_available_slots(date_str):
-    slots = []
-    for hour in range(14, 21):
-        slots.append(f"{hour:02d}:00")
+    slots = ["14:00", "15:00", "16:00", "17:00", "18:00", "19:00", "20:00"]
+    
+    now = get_taiwan_now()
+    today = now.strftime("%Y-%m-%d")
+    current_hour = now.hour
+    
+    if date_str == today:
+        slots = [s for s in slots if int(s[:2]) > current_hour]
     
     booked = [a["time"] for a in appointments_db 
               if a["date"] == date_str and a["status"] == "confirmed"]
@@ -147,7 +173,7 @@ def create_appointment(user_id, name, phone, service_id, date_str, time_str):
         "date": date_str,
         "time": time_str,
         "status": "confirmed",
-        "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        "created_at": get_taiwan_now().strftime("%Y-%m-%d %H:%M:%S")
     }
     
     appointments_db.append(new_appointment)
@@ -168,11 +194,6 @@ def cancel_appointment(user_id, apt_id):
             a["status"] = "cancelled"
             return True
     return False
-
-def get_weekday_name(date_str):
-    date_obj = datetime.strptime(date_str, "%Y-%m-%d")
-    weekdays = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
-    return weekdays[date_obj.weekday()]
 
 def admin_view_all():
     confirmed = [a for a in appointments_db if a["status"] == "confirmed"]
@@ -280,40 +301,48 @@ def handle_message(event):
         state = user_state[user_id]
         
         if state.get("step") == "waiting_name":
-            state["name"] = text
-            state["step"] = "waiting_phone"
-            user_state[user_id] = state
-            send_reply(reply_token, TextMessage(text=f"👤 姓名：{text}\n\n請輸入手機號碼："))
-            return
-        
-        elif state.get("step") == "waiting_phone":
-            state["phone"] = text
-            apt_id, error = create_appointment(
-                user_id, state["name"], text,
-                state["service_id"], state["selected_date"], state["selected_time"]
-            )
+            parts = text.strip().split()
             
-            if error:
-                send_reply(reply_token, TextMessage(text=f"❌ {error}\n\n請重新選擇"))
+            if len(parts) >= 2:
+                state["name"] = parts[0]
+                state["phone"] = parts[1]
+                
+                apt_id, error = create_appointment(
+                    user_id, state["name"], state["phone"],
+                    state["service_id"], state["selected_date"], state["selected_time"]
+                )
+                
+                if error:
+                    send_reply(reply_token, TextMessage(text=f"❌ {error}\n\n請重新選擇"))
+                    del user_state[user_id]
+                    return
+                
+                service = SERVICES[state["service_id"]]
+                weekday = get_weekday_name(state["selected_date"])
+                
+                send_reply(reply_token, TextMessage(
+                    text=f"✅ 預約成功！\n\n"
+                         f"📌 預約編號：{apt_id}\n"
+                         f"📅 日期：{state['selected_date']} {weekday}\n"
+                         f"⏰ 時間：{state['selected_time']}\n"
+                         f"💆 服務：{service['name']}\n"
+                         f"💰 費用：${service['price']}\n"
+                         f"👤 姓名：{state['name']}\n"
+                         f"📞 手機：{state['phone']}\n"
+                         f"⚠️ 請準時抵達，取消請提前告知\n📌 調理當天請穿著寬鬆褲裝"
+                ))
                 del user_state[user_id]
                 return
-            
-            service = SERVICES[state["service_id"]]
-            weekday = get_weekday_name(state["selected_date"])
-            
-            send_reply(reply_token, TextMessage(
-                text=f"✅ 預約成功！\n\n"
-                     f"📌 預約編號：{apt_id}\n"
-                     f"📅 日期：{state['selected_date']} {weekday}\n"
-                     f"⏰ 時間：{state['selected_time']}\n"
-                     f"💆 服務：{service['name']}\n"
-                     f"💰 費用：${service['price']}\n"
-                     f"👤 姓名：{state['name']}\n"
-                     f"📞 手機：{text}\n"
-                     f"⚠️ 請準時抵達，取消請提前告知"
-            ))
-            del user_state[user_id]
-            return
+            else:
+                send_reply(reply_token, TextMessage(
+                    text="❌ 請輸入正確格式\n\n"
+                         "請輸入您的姓名和手機號碼，中間用空格隔開\n\n"
+                         "範例：王小明 0912345678"
+                ))
+                return
+        
+        elif state.get("step") == "waiting_phone":
+            pass
         
         elif state.get("step") == "admin_waiting_year":
             try:
@@ -444,7 +473,7 @@ def handle_postback(event):
         user_state[user_id] = {"step": "waiting_year", "service_id": service_id, "date_page": 0}
         
         items = []
-        current_year = datetime.now().year
+        current_year = get_taiwan_now().year
         for i in range(current_year, current_year + 2):
             items.append(QuickReplyItem(action=PostbackAction(label=f"{i}年", data=f"year_{i}")))
         send_reply(reply_token, TextMessage(text="請選擇年份：", quick_reply=QuickReply(items=items)))
@@ -456,15 +485,24 @@ def handle_postback(event):
         state["step"] = "waiting_month"
         user_state[user_id] = state
         
+        now = get_taiwan_now()
         items = []
         for i in range(1, 13):
+            if year < now.year:
+                break
+            if year == now.year and i < now.month:
+                continue
             items.append(QuickReplyItem(action=PostbackAction(label=f"{i}月", data=f"month_{i}")))
-        send_reply(reply_token, TextMessage(text=f"請選擇 {year} 年月份：", quick_reply=QuickReply(items=items)))
+        
+        send_reply(reply_token, TextMessage(
+            text=f"請選擇 {year} 年月份：",
+            quick_reply=QuickReply(items=items)
+        ))
     
     elif data.startswith("month_"):
         month = int(data.split("_")[1])
         state = user_state.get(user_id, {})
-        year = state.get("year", datetime.now().year)
+        year = state.get("year", get_taiwan_now().year)
         all_dates = get_available_dates(year, month)
         
         if not all_dates:
@@ -506,10 +544,21 @@ def handle_postback(event):
         for slot in slots:
             items.append(QuickReplyItem(action=PostbackAction(label=slot, data=f"time_{slot}")))
         
+        items.append(QuickReplyItem(action=PostbackAction(
+            label="⬅️ 返回選日期",
+            data="back_to_date"
+        )))
+        
         send_reply(reply_token, TextMessage(
             text=f"📅 {date_str} {weekday}\n\n⏰ 營業時間：14:00-21:00\n\n請選擇時段：",
             quick_reply=QuickReply(items=items)
         ))
+    
+    elif data == "back_to_date":
+        state = user_state.get(user_id, {})
+        state["step"] = "waiting_date"
+        user_state[user_id] = state
+        show_date_page(user_id, reply_token)
     
     elif data.startswith("time_"):
         time_str = data.split("_")[1]
@@ -517,7 +566,11 @@ def handle_postback(event):
         state["selected_time"] = time_str
         state["step"] = "waiting_name"
         user_state[user_id] = state
-        send_reply(reply_token, TextMessage(text=f"⏰ 時段：{time_str}\n\n請輸入您的姓名："))
+        send_reply(reply_token, TextMessage(
+            text=f"⏰ 時段：{time_str}\n\n"
+                 f"請輸入您的姓名和手機號碼（中間用空格隔開）\n\n"
+                 f"範例：王小明 0912345678"
+        ))
     
     elif data.startswith("cancel_"):
         apt_id = int(data.split("_")[1])
@@ -550,8 +603,8 @@ def handle_postback(event):
 def show_date_page(user_id, reply_token):
     state = user_state.get(user_id, {})
     all_dates = state.get("all_dates", [])
-    year = state.get("year", datetime.now().year)
-    month = state.get("month", datetime.now().month)
+    year = state.get("year", get_taiwan_now().year)
+    month = state.get("month", get_taiwan_now().month)
     current_page = state.get("date_page", 0)
     
     total_pages = (len(all_dates) + ITEMS_PER_PAGE - 1) // ITEMS_PER_PAGE
