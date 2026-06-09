@@ -47,8 +47,8 @@ handler = WebhookHandler(CHANNEL_SECRET)
 
 # 服務項目
 SERVICES = {
-    "1": {"name": "健康調理", "price": 1500, "duration": 60, "emoji": "💆"},
-    "2": {"name": "局部紓壓", "price": 800, "duration": 30, "emoji": "💪"}
+    "1": {"name": "健康調理", "price": 1500, "duration": 90, "emoji": "💆"},
+    "2": {"name": "局部紓壓", "price": 800, "duration": 90, "emoji": "💪"}
 }
 
 # 使用記憶體儲存（僅作為暫存）
@@ -90,21 +90,26 @@ def get_available_dates(year, month):
     return dates
 # ==========================================
 
-# ========== 過期時段不顯示 + 已預約時段不顯示 ==========
+# ========== 新時段（1.5小時/間隔半小時緩衝）==========
 def get_available_slots(date_str):
-    """產生可預約時段（排除已過期時段和已預約時段）"""
-    slots = []
-    for hour in range(14, 21):
-        slots.append(f"{hour:02d}:00")
+    """產生可預約時段（1.5小時為單位，間隔半小時緩衝）"""
+    # 時段定義：開始時間 -> 對應的服務時段
+    slots = [
+        "14:00",  # 14:00 - 15:30
+        "15:30",  # 15:30 - 17:00
+        "17:00",  # 17:00 - 18:30
+        "18:30",  # 18:30 - 20:00
+        "20:00",  # 20:00 - 21:30
+    ]
     
     # 使用台灣時間
     now = get_taiwan_now()
     today = now.strftime("%Y-%m-%d")
-    current_hour = now.hour
+    current_time = now.strftime("%H:%M")
     
     # 如果是今天，過去的時段不要顯示
     if date_str == today:
-        slots = [s for s in slots if int(s[:2]) > current_hour]
+        slots = [s for s in slots if s > current_time]
     
     # 從記憶體讀取已預約時段
     booked = [a["time"] for a in appointments_db 
@@ -534,8 +539,8 @@ def handle_message(event):
     if text == "我要預約":
         welcome_msg = (
             "🧠 頭薦骨調理預約系統\n\n"
-            "📅 營業時間：14:00 - 21:00\n"
-            "⏰ 每小時一個時段\n"
+            "📅 營業時間：14:00 - 21:30\n"
+            "⏰ 每1.5小時一個時段\n"
             "📴 公休日：每週五\n\n"
             "請選擇服務項目："
         )
@@ -595,7 +600,7 @@ def handle_message(event):
     else:
         welcome_msg = (
             "🧠 頭薦骨調理預約系統\n\n"
-            "📅 營業時間：14:00 - 21:00\n"
+            "📅 營業時間：14:00 - 21:30\n"
             "📴 公休日：每週五\n\n"
             "✅ 輸入「我要預約」開始\n"
             "✅ 輸入「我的預約」查詢\n"
@@ -702,7 +707,7 @@ def handle_postback(event):
         )))
         
         send_reply(reply_token, TextMessage(
-            text=f"📅 {date_str} {weekday}\n\n⏰ 營業時間：14:00-21:00\n\n請選擇時段：",
+            text=f"📅 {date_str} {weekday}\n\n⏰ 營業時間：14:00-21:30（每1.5小時）\n\n請選擇時段：",
             quick_reply=QuickReply(items=items)
         ))
     
