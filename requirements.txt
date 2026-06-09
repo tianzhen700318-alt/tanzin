@@ -1,6 +1,4 @@
 Flask==2.3.3
 line-bot-sdk-python==3.5.0
 python-dotenv==1.0.0
-gspread==6.0.0
-google-auth==2.23.4
 gunicorn==21.2.0
