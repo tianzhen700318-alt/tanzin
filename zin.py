@@ -16,20 +16,7 @@ from datetime import datetime, timezone, timedelta
 import json
 import os
 import calendar
-from google.oauth2 import service_account
-from googleapiclient.discovery import build
-
-# ========== Google Sheets 直接讀寫 ==========
-CREDENTIALS_JSON = os.environ.get('GOOGLE_CREDENTIALS')
-SHEET_ID = os.environ.get('GOOGLE_SHEET_ID')
-
-creds = service_account.Credentials.from_service_account_info(
-    json.loads(CREDENTIALS_JSON),
-    scopes=['https://www.googleapis.com/auth/spreadsheets']
-)
-sheets = build('sheets', 'v4', credentials=creds)
-print("✅ Google Sheets 連線成功")
-# ==========================================
+import requests
 
 # ========== 台灣時區 ==========
 def get_taiwan_now():
@@ -48,6 +35,9 @@ CHANNEL_SECRET = os.environ.get('LINE_CHANNEL_SECRET')
 CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN')
 ADMIN_USER_IDS = [uid.strip() for uid in os.environ.get('ADMIN_USER_IDS', '').split(',') if uid.strip()]
 
+# Google Sheets Apps Script 網址
+GOOGLE_SHEETS_URL = os.environ.get('GOOGLE_SHEETS_URL', '')
+
 app = Flask(__name__)
 configuration = Configuration(access_token=CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(CHANNEL_SECRET)
@@ -58,56 +48,42 @@ SERVICES = {
 }
 ITEMS_PER_PAGE = 10
 
+# 記憶體暫存（加速用）
+appointments_cache = []
+cache_time = 0
+
+def get_all_appointments():
+    global appointments_cache, cache_time
+    now = get_taiwan_now().timestamp()
+    if now - cache_time < 5:
+        return appointments_cache
+    
+    if not GOOGLE_SHEETS_URL:
+        return []
+    
+    try:
+        response = requests.get(GOOGLE_SHEETS_URL, timeout=10)
+        result = response.json()
+        if result.get('success'):
+            appointments_cache = result.get('data', [])
+            cache_time = now
+            return appointments_cache
+    except Exception as e:
+        print(f"⚠️ 讀取失敗: {e}")
+    return []
+
+def add_appointment(data):
+    if not GOOGLE_SHEETS_URL:
+        return False
+    try:
+        response = requests.post(GOOGLE_SHEETS_URL, json=data, timeout=10)
+        return response.status_code == 200
+    except:
+        return False
+
 def is_business_day(date_obj):
     return date_obj.weekday() != 4
 
-# ========== 從 Google Sheets 讀取所有預約 ==========
-def get_all_appointments():
-    result = sheets.spreadsheets().values().get(
-        spreadsheetId=SHEET_ID,
-        range='工作表1!A:I'
-    ).execute()
-    values = result.get('values', [])
-    appointments = []
-    for i, row in enumerate(values):
-        if i == 0:
-            continue
-        if len(row) >= 8 and row[0]:
-            appointments.append({
-                'id': int(row[0]),
-                'date': row[1],
-                'time': row[3],
-                'service_name': row[4],
-                'service_price': int(row[5]),
-                'customer_name': row[6],
-                'customer_phone': row[7],
-                'user_id': row[8] if len(row) > 8 else '',
-                'status': 'confirmed'
-            })
-    return appointments
-
-# ========== 寫入 Google Sheets ==========
-def add_appointment(data):
-    result = sheets.spreadsheets().values().get(
-        spreadsheetId=SHEET_ID,
-        range='工作表1!A:A'
-    ).execute()
-    next_row = len(result.get('values', [])) + 1
-    
-    body = {'values': [[
-        data['id'], data['date'], get_weekday_name(data['date']),
-        data['time'], data['service_name'], data['service_price'],
-        data['customer_name'], data['customer_phone'], data['user_id']
-    ]]}
-    
-    sheets.spreadsheets().values().update(
-        spreadsheetId=SHEET_ID,
-        range=f'工作表1!A{next_row}',
-        valueInputOption='RAW',
-        body=body
-    ).execute()
-
-# ========== 可預約日期 ==========
 def get_available_dates(year, month):
     dates = []
     today = get_taiwan_today()
@@ -117,7 +93,6 @@ def get_available_dates(year, month):
             dates.append(date_obj.strftime("%Y-%m-%d"))
     return dates
 
-# ========== 可預約時段 ==========
 def get_available_slots(date_str):
     slots = ["14:00", "15:30", "17:00", "18:30", "20:00"]
     now = get_taiwan_now()
@@ -128,41 +103,48 @@ def get_available_slots(date_str):
     booked = [a['time'] for a in appointments if a['date'] == date_str]
     return [s for s in slots if s not in booked]
 
-# ========== 檢查重複 ==========
 def check_duplicate(date, time, phone, user_id):
     appointments = get_all_appointments()
     for a in appointments:
         if a['date'] == date and a['time'] == time:
             return True, f"❌ {date} {time} 這個時段已經被預約了！"
-        if a['customer_phone'] == phone and a['date'] == date and a['time'] == time:
+        if a['phone'] == phone and a['date'] == date and a['time'] == time:
             return True, "❌ 這個手機號碼已經在這個時段有預約了！"
-        if a['user_id'] == user_id and a['date'] == date and a['time'] == time:
+        if a.get('user_id') == user_id and a['date'] == date and a['time'] == time:
             return True, "❌ 您已經在這個時段有預約了！"
     return False, None
 
-# ========== 建立預約 ==========
 def create_appointment(user_id, name, phone, service_id, date_str, time_str):
     is_dup, err = check_duplicate(date_str, time_str, phone, user_id)
     if is_dup:
         return None, err
     
     service = SERVICES[service_id]
+    weekday = get_weekday_name(date_str)
     appointments = get_all_appointments()
-    next_id = max([a['id'] for a in appointments], default=0) + 1
+    next_id = max([int(a['id']) for a in appointments], default=0) + 1
     
-    add_appointment({
+    success = add_appointment({
         'id': next_id,
         'user_id': user_id,
-        'customer_name': name,
-        'customer_phone': phone,
-        'service_name': service['name'],
-        'service_price': service['price'],
         'date': date_str,
-        'time': time_str
+        'weekday': weekday,
+        'time': time_str,
+        'service': service['name'],
+        'price': service['price'],
+        'name': name,
+        'phone': phone
     })
     
-    # 發送通知給店家
-    weekday = get_weekday_name(date_str)
+    if not success:
+        return None, "❌ 寫入失敗，請稍後再試"
+    
+    # 清除快取
+    global appointments_cache, cache_time
+    appointments_cache = []
+    cache_time = 0
+    
+    # 發送通知
     msg = f"🔔 新預約通知！\n\n📌 預約編號：{next_id}\n📅 日期：{date_str} {weekday}\n⏰ 時間：{time_str}\n💆 服務：{service['name']}\n💰 金額：${service['price']}\n👤 客戶：{name}\n📞 電話：{phone}"
     for admin_id in ADMIN_USER_IDS:
         if admin_id:
@@ -171,21 +153,19 @@ def create_appointment(user_id, name, phone, service_id, date_str, time_str):
     
     return next_id, None
 
-# ========== 查詢使用者預約 ==========
 def get_user_appointments(user_id):
     appointments = get_all_appointments()
-    return [a for a in appointments if a['user_id'] == user_id]
+    return [a for a in appointments if a.get('user_id') == user_id]
 
-# ========== 店家後台 ==========
 def admin_view_all():
     appointments = get_all_appointments()
     if not appointments:
         return "📋 目前沒有任何預約"
     appointments.sort(key=lambda x: (x['date'], x['time']))
-    total = sum(a['service_price'] for a in appointments)
+    total = sum(int(a['price']) for a in appointments)
     msg = "📋 所有預約清單\n\n"
     for a in appointments:
-        msg += f"🔹 #{a['id']}\n   📅 {a['date']}\n   ⏰ {a['time']}\n   💆 {a['service_name']}\n   💰 ${a['service_price']}\n   👤 {a['customer_name']}\n   📞 {a['customer_phone']}\n\n"
+        msg += f"🔹 #{a['id']}\n   📅 {a['date']}\n   ⏰ {a['time']}\n   💆 {a['service']}\n   💰 ${a['price']}\n   👤 {a['name']}\n   📞 {a['phone']}\n\n"
     msg += f"總計: {len(appointments)} 筆預約\n總營收: ${total}"
     return msg
 
@@ -194,17 +174,16 @@ def admin_view_month(year, month):
     filtered = [a for a in appointments if a['date'].startswith(f"{year}-{month:02d}")]
     if not filtered:
         return f"📋 {year}年{month}月 沒有任何預約"
-    total = sum(a['service_price'] for a in filtered)
+    total = sum(int(a['price']) for a in filtered)
     msg = f"📋 {year}年{month}月 預約清單\n\n"
     for a in filtered:
-        msg += f"🔹 #{a['id']}\n   📅 {a['date']}\n   ⏰ {a['time']}\n   💆 {a['service_name']}\n   💰 ${a['service_price']}\n   👤 {a['customer_name']}\n   📞 {a['customer_phone']}\n\n"
+        msg += f"🔹 #{a['id']}\n   📅 {a['date']}\n   ⏰ {a['time']}\n   💆 {a['service']}\n   💰 ${a['price']}\n   👤 {a['name']}\n   📞 {a['phone']}\n\n"
     msg += f"總計: {len(filtered)} 筆預約\n總營收: ${total}"
     return msg
 
 def admin_cancel_by_id(apt_id):
     return "⚠️ 取消預約請直接在 Google 試算表中刪除該列"
 
-# ========== LINE 處理 ==========
 user_state = {}
 
 def send_reply(reply_token, messages):
@@ -295,7 +274,7 @@ def handle_message(event):
 
     if text == "我要預約":
         send_reply(reply_token, TextMessage(
-            text="🧠 頭薦骨調理預約系統\n\n📅 營業時間：14:00-21:30\n⏰ 每1小時一個時段\n📴 公休日：每週五\n\n請選擇服務項目：",
+            text="🧠 頭薦骨調理預約系統\n\n📅 營業時間：14:00-21:30\n⏰ 每1.5小時一個時段\n📴 公休日：每週五\n\n請選擇服務項目：",
             quick_reply=QuickReply(items=get_service_buttons())
         ))
     elif text == "我的預約":
@@ -305,7 +284,7 @@ def handle_message(event):
         else:
             msg = "📋 您的預約：\n\n"
             for a in apps:
-                msg += f"🔹 編號 {a['id']}\n   📅 {a['date']}\n   ⏰ {a['time']}\n   💆 {a['service_name']}\n   💰 ${a['service_price']}\n\n"
+                msg += f"🔹 編號 {a['id']}\n   📅 {a['date']}\n   ⏰ {a['time']}\n   💆 {a['service']}\n   💰 ${a['price']}\n\n"
             send_reply(reply_token, TextMessage(text=msg))
     elif text == "取消查詢":
         apps = get_user_appointments(user_id)
