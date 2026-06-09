@@ -90,7 +90,7 @@ def get_available_dates(year, month):
     return dates
 # ==========================================
 
-# ========== 過期時段不顯示 ==========
+# ========== 過期時段不顯示 + 已預約時段不顯示 ==========
 def get_available_slots(date_str):
     """產生可預約時段（排除已過期時段和已預約時段）"""
     slots = []
@@ -106,18 +106,22 @@ def get_available_slots(date_str):
     if date_str == today:
         slots = [s for s in slots if int(s[:2]) > current_hour]
     
-    # 扣除已預約的時段（從 Google Sheets 檢查）
-    booked = []
+    # 從記憶體讀取已預約時段
+    booked = [a["time"] for a in appointments_db 
+              if a["date"] == date_str and a["status"] == "confirmed"]
+    
+    # 同時從 Google Sheets 讀取（確保同步）
     if GOOGLE_SHEETS_URL:
         try:
             response = requests.get(GOOGLE_SHEETS_URL, timeout=10)
             result = response.json()
             if result.get('success'):
                 appointments = result.get('data', [])
-                booked = [a["time"] for a in appointments 
-                         if a["date"] == date_str]
-        except:
-            pass
+                gs_booked = [a["time"] for a in appointments 
+                            if a["date"] == date_str]
+                booked = list(set(booked + gs_booked))
+        except Exception as e:
+            print(f"⚠️ 讀取 Google Sheets 失敗: {e}")
     
     return [s for s in slots if s not in booked]
 # ==========================================
