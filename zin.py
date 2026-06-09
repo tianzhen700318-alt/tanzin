@@ -129,28 +129,29 @@ def check_duplicate_appointment(user_id, name, phone, date_str, time_str):
         return False, None
     
     try:
-        response = requests.get(GOOGLE_SHEETS_URL, timeout=10)
+        check_data = {
+            "action": "check",
+            "user_id": user_id,
+            "date": date_str,
+            "time": time_str,
+            "phone": phone
+        }
+        
+        response = requests.post(
+            GOOGLE_SHEETS_URL,
+            json=check_data,
+            headers={"Content-Type": "application/json"},
+            timeout=10
+        )
+        
+        if response.status_code != 200:
+            print(f"⚠️ 檢查請求失敗: HTTP {response.status_code}")
+            return False, None
+        
         result = response.json()
         
         if not result.get('success'):
-            return False, None
-        
-        appointments = result.get('data', [])
-        
-        for a in appointments:
-            # 檢查同 LINE 使用者、同日期、同時段
-            if a.get('user_id') == user_id and a.get('date') == date_str and a.get('time') == time_str:
-                return True, "❌ 您已經在這個時段有預約了！"
-            
-            # 檢查同手機、同日期、同時段
-            if a.get('phone') == phone and a.get('date') == date_str and a.get('time') == time_str:
-                return True, "❌ 這個手機號碼已經在相同時段有預約了！"
-        
-        # 檢查同一天同一個使用者超過3筆
-        same_day_count = sum(1 for a in appointments 
-                            if a.get('user_id') == user_id and a.get('date') == date_str)
-        if same_day_count >= 3:
-            return True, "❌ 您同一天最多只能預約3個時段！"
+            return True, result.get('error', '預約檢查失敗')
         
         return False, None
         
@@ -170,6 +171,7 @@ def write_to_google_sheets(appointment):
         weekday = get_weekday_name(appointment["date"])
         
         data = {
+            "action": "create",
             "user_id": appointment["user_id"],
             "id": appointment["id"],
             "date": appointment["date"],
@@ -190,11 +192,17 @@ def write_to_google_sheets(appointment):
         )
         
         if response.status_code == 200:
-            print(f"✅ 已寫入 Google Sheets - 預約編號: {appointment['id']}")
-            return True
+            result = response.json()
+            if result.get('success'):
+                print(f"✅ 已寫入 Google Sheets - 預約編號: {appointment['id']}")
+                return True
+            else:
+                print(f"⚠️ 寫入失敗: {result.get('error')}")
+                return False
         else:
-            print(f"⚠️ 寫入失敗: {response.text}")
+            print(f"⚠️ 寫入失敗: HTTP {response.status_code}")
             return False
+            
     except Exception as e:
         print(f"⚠️ 寫入例外: {e}")
         return False
