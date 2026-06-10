@@ -3,39 +3,48 @@ import json
 import uuid
 from datetime import datetime, timedelta
 from flask import Flask, request, abort
-from linebot.v3 import WebhookHandler
-from linebot.v3.exceptions import InvalidSignatureError
-from linebot.v3.messaging import (
-    MessagingApi, Configuration, ReplyMessageRequest,
-    PushMessageRequest, TextMessage, FlexMessage,
-    FlexContainer, QuickReply, QuickReplyItem, MessageAction
+from linebot import LineBotApi, WebhookHandler
+from linebot.exceptions import InvalidSignatureError
+from linebot.models import (
+    TextSendMessage, FlexSendMessage, QuickReply, QuickReplyButton, MessageAction,
+    PostbackEvent, MessageEvent, TextMessage, FollowEvent
 )
-from linebot.v3.webhooks import MessageEvent, TextMessageContent, PostbackEvent
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import pytz
+from dotenv import load_dotenv
+
+load_dotenv()
 
 app = Flask(__name__)
 
-# ========== LINE Bot 設定 ==========
 channel_access_token = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN')
 channel_secret = os.environ.get('LINE_CHANNEL_SECRET')
+if not channel_access_token or not channel_secret:
+    raise ValueError("請設定 LINE_CHANNEL_ACCESS_TOKEN 和 LINE_CHANNEL_SECRET")
 
-configuration = Configuration(access_token=channel_access_token)
+line_bot_api = LineBotApi(channel_access_token)
 handler = WebhookHandler(channel_secret)
-line_bot_api = MessagingApi(configuration)
 
 # ========== Google Sheets 設定 ==========
 def get_google_sheet():
-    scope = ['https://spreadsheets.google.com/feeds',
-             'https://www.googleapis.com/auth/drive']
-    creds_json = json.loads(os.environ.get('GOOGLE_SERVICE_ACCOUNT_JSON'))
+    scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
+    creds_json_str = os.environ.get('GOOGLE_SERVICE_ACCOUNT_JSON')
+    if not creds_json_str:
+        raise ValueError("請設定 GOOGLE_SERVICE_ACCOUNT_JSON")
+    creds_json = json.loads(creds_json_str)
     creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_json, scope)
     client = gspread.authorize(creds)
-    sheet = client.open_by_key(os.environ.get('GOOGLE_SHEET_ID'))
-    return sheet
+    sheet_id = os.environ.get('GOOGLE_SHEET_ID')
+    if not sheet_id:
+        raise ValueError("請設定 GOOGLE_SHEET_ID")
+    return client.open_by_key(sheet_id)
 
-# ========== 固定時段（間隔30分鐘緩衝已內建） ==========
+SERVICES = [
+    {"id": 1, "name": "頭薦骨調理", "price": 1500},
+    {"id": 2, "name": "局部按摩", "price": 800}
+]
+
 TIME_SLOTS = [
     {"id": 1, "start": "14:00", "end": "15:30"},
     {"id": 2, "start": "15:30", "end": "17:00"},
@@ -44,780 +53,482 @@ TIME_SLOTS = [
     {"id": 5, "start": "20:00", "end": "21:30"}
 ]
 
-# ========== 輔助函數 ==========
 def get_taiwan_now():
-    tz = pytz.timezone('Asia/Taipei')
-    return datetime.now(tz)
+    return datetime.now(pytz.timezone('Asia/Taipei'))
 
-def get_available_dates(year, month):
-    """取得該月份可預約的日期（今天之後 + 已滿日過濾）"""
-    tz = pytz.timezone('Asia/Taipei')
-    today = get_taiwan_now().date()
-    
-    sheet = get_google_sheet()
-    bookings_sheet = sheet.worksheet("預約紀錄")
-    all_bookings = bookings_sheet.get_all_records()
-    
-    # 找出每個日期已被預約的時段數量
-    month_first = datetime(year, month, 1).date()
-    if month == 12:
-        next_month = datetime(year + 1, 1, 1).date()
-    else:
-        next_month = datetime(year, month + 1, 1).date()
-    
-    available_dates = []
-    current_date = month_first
-    while current_date < next_month:
-        if current_date >= today:
-            # 檢查該日期是否所有時段都被預約
-            date_str = current_date.strftime("%Y-%m-%d")
-            booked_count = sum(1 for b in all_bookings 
-                              if b['日期'] == date_str and b['狀態'] == 'confirmed')
-            if booked_count < len(TIME_SLOTS):
-                available_dates.append(current_date)
-        current_date += timedelta(days=1)
-    
-    return available_dates
+def is_admin(user_id):
+    try:
+        sheet = get_google_sheet()
+        admin_ws = sheet.worksheet("店家後台")
+        admins_raw = admin_ws.col_values(1)
+        admins = [str(a).strip() for a in admins_raw if str(a).strip()]
+        return user_id in admins
+    except Exception as e:
+        print(f"檢查店家權限錯誤: {e}")
+        return False
 
-def get_available_slots(date_str):
-    """取得某日期可預約的時段（排除已被預約的）"""
-    sheet = get_google_sheet()
-    bookings_sheet = sheet.worksheet("預約紀錄")
-    all_bookings = bookings_sheet.get_all_records()
-    
-    booked_slots = [b['開始時間'] for b in all_bookings 
-                    if b['日期'] == date_str and b['狀態'] == 'confirmed']
-    
-    available = [slot for slot in TIME_SLOTS if slot['start'] not in booked_slots]
-    return available
+def get_main_menu_quick_reply(user_id):
+    items = [QuickReplyButton(action=MessageAction(label="📅 立即預約", text="我要預約"))]
+    if is_admin(user_id):
+        items.append(QuickReplyButton(action=MessageAction(label="🔧 店家後台", text="店家後台")))
+    return QuickReply(items=items)
 
-def create_booking(order_id, date, start_time, end_time, name, phone):
-    """建立預約記錄"""
-    sheet = get_google_sheet()
-    bookings_sheet = sheet.worksheet("預約紀錄")
-    now = get_taiwan_now().strftime("%Y-%m-%d %H:%M:%S")
-    
-    bookings_sheet.append_row([
-        order_id, date, start_time, end_time, name, phone, 'confirmed', now
-    ])
-    return True
-
-def cancel_booking(order_id):
-    """取消預約（將狀態改為 cancelled）"""
-    sheet = get_google_sheet()
-    bookings_sheet = sheet.worksheet("預約紀錄")
-    records = bookings_sheet.get_all_records()
-    
-    for idx, record in enumerate(records, start=2):  # 第1行是標題
-        if record['訂單編號'] == order_id and record['狀態'] == 'confirmed':
-            bookings_sheet.update(f'G{idx}', 'cancelled')
-            return True
-    return False
-
-def get_user_bookings(user_phone):
-    """查詢使用者的預約紀錄"""
-    sheet = get_google_sheet()
-    bookings_sheet = sheet.worksheet("預約紀錄")
-    records = bookings_sheet.get_all_records()
-    
-    user_bookings = [r for r in records if r['客戶電話'] == user_phone and r['狀態'] == 'confirmed']
-    return user_bookings
-
-def get_all_bookings():
-    """取得所有有效預約（店家後台用）"""
-    sheet = get_google_sheet()
-    bookings_sheet = sheet.worksheet("預約紀錄")
-    records = bookings_sheet.get_all_records()
-    return [r for r in records if r['狀態'] == 'confirmed']
-
-def get_statistics():
-    """取得營業統計"""
-    sheet = get_google_sheet()
-    bookings_sheet = sheet.worksheet("預約紀錄")
-    records = bookings_sheet.get_all_records()
-    
-    confirmed = [r for r in records if r['狀態'] == 'confirmed']
-    cancelled = [r for r in records if r['狀態'] == 'cancelled']
-    
-    # 本月統計
-    now = get_taiwan_now()
-    this_month = now.strftime("%Y-%m")
-    this_month_bookings = [r for r in confirmed if r['日期'].startswith(this_month)]
-    
-    return {
-        "total": len(confirmed),
-        "cancelled": len(cancelled),
-        "this_month": len(this_month_bookings)
-    }
-
-# ========== Flex 訊息模板 ==========
-def create_calendar_flex(year, month, available_dates):
-    """產生月份日曆 Flex 卡片"""
-    # 找出當月第一天是星期幾（0=星期一, 6=星期日）
-    first_day = datetime(year, month, 1)
-    start_weekday = first_day.weekday()  # 0=Monday
-    
-    # 計算該月天數
-    if month == 12:
-        next_month = datetime(year + 1, 1, 1)
-    else:
-        next_month = datetime(year, month + 1, 1)
-    days_in_month = (next_month - datetime(year, month, 1)).days
-    
-    # 建立日期按鈕
-    buttons = []
-    # 星期標題
-    weekdays = ['一', '二', '三', '四', '五', '六', '日']
-    for wd in weekdays:
-        buttons.append({
-            "type": "text",
-            "text": wd,
-            "size": "sm",
-            "color": "#aaaaaa",
-            "align": "center"
-        })
-    
-    # 補空白
-    for _ in range(start_weekday):
-        buttons.append({
-            "type": "text",
-            "text": " ",
-            "size": "sm",
-            "align": "center"
-        })
-    
-    # 填入日期
-    available_set = {d.day for d in available_dates}
-    for day in range(1, days_in_month + 1):
-        is_available = day in available_set
-        buttons.append({
-            "type": "button",
-            "action": {
-                "type": "postback",
-                "label": str(day),
-                "data": f"select_date={year}-{month:02d}-{day:02d}",
-                "displayText": f"選擇 {year}/{month}/{day}"
-            },
-            "color": "#4CAF50" if is_available else "#cccccc",
-            "style": "primary" if is_available else "secondary"
-        })
-    
-    return FlexMessage(
-        alt_text=f"{year}年{month}月 預約日曆",
-        contents={
-            "type": "bubble",
-            "header": {
-                "type": "box",
-                "layout": "vertical",
-                "contents": [
-                    {
-                        "type": "text",
-                        "text": f"🗓️ {year}年{month}月",
-                        "weight": "bold",
-                        "size": "xl",
-                        "align": "center"
-                    }
-                ]
-            },
-            "body": {
-                "type": "box",
-                "layout": "vertical",
-                "contents": [
-                    {
-                        "type": "box",
-                        "layout": "grid",
-                        "contents": buttons,
-                        "justifyContent": "flex-start",
-                        "width": "100%"
-                    }
-                ]
-            },
-            "footer": {
-                "type": "box",
-                "layout": "vertical",
-                "contents": [
-                    {
-                        "type": "button",
-                        "action": {
-                            "type": "postback",
-                            "label": "⬅️ 上月",
-                            "data": f"change_month={year},{month-1}"
-                        },
-                        "color": "#FF9800"
-                    },
-                    {
-                        "type": "button",
-                        "action": {
-                            "type": "postback",
-                            "label": "➡️ 下月",
-                            "data": f"change_month={year},{month+1}"
-                        },
-                        "color": "#FF9800",
-                        "margin": "sm"
-                    },
-                    {
-                        "type": "button",
-                        "action": {
-                            "type": "postback",
-                            "label": "🏠 主選單",
-                            "data": "main_menu"
-                        },
-                        "color": "#666666",
-                        "margin": "sm"
-                    }
-                ]
-            }
-        }
+def send_welcome_with_menu(event):
+    welcome_text = (
+        "🧠 頭薦骨調理預約系統\n\n"
+        "📅 營業時間：14:00 - 21:00\n"
+        "⏰ 每1小時一個時段\n"
+        "📴 公休日：每週五\n\n"
+        "✅ 點擊下方按鈕開始預約。"
+    )
+    line_bot_api.reply_message(
+        event.reply_token,
+        TextSendMessage(text=welcome_text, quick_reply=get_main_menu_quick_reply(event.source.user_id))
     )
 
-def create_slots_flex(date_str, available_slots):
-    """產生時段選擇 Flex 卡片"""
+def get_available_dates(days=60):
+    now = get_taiwan_now()
+    today = now.date()
+    try:
+        sheet = get_google_sheet()
+        ws = sheet.worksheet("預約紀錄")
+        records = ws.get_all_records()
+    except Exception as e:
+        print(f"[錯誤] 讀取預約紀錄失敗: {e}")
+        records = []
+    available = []
+    for i in range(days):
+        d = today + timedelta(days=i)
+        if d.weekday() == 4:
+            continue
+        date_str = d.strftime("%Y-%m-%d")
+        booked = sum(1 for r in records if r.get('日期') == date_str and r.get('狀態') == 'confirmed')
+        if booked < len(TIME_SLOTS):
+            available.append(d)
+    return available
+
+def get_available_slots(date_str):
+    now = get_taiwan_now()
+    try:
+        sheet = get_google_sheet()
+        ws = sheet.worksheet("預約紀錄")
+        records = ws.get_all_records()
+    except Exception as e:
+        print(f"[錯誤] 讀取時段錯誤: {e}")
+        records = []
+    booked = [r.get('開始時間') for r in records if r.get('日期') == date_str and r.get('狀態') == 'confirmed']
+    all_slots = TIME_SLOTS[:]
+    if date_str == now.strftime("%Y-%m-%d"):
+        current_time = now.strftime("%H:%M")
+        all_slots = [s for s in all_slots if s['start'] > current_time]
+    available = [s for s in all_slots if s['start'] not in booked]
+    return available
+
+def create_booking(order_id, date, start, end, service_name, price, name, phone):
+    try:
+        sheet = get_google_sheet()
+        ws = sheet.worksheet("預約紀錄")
+        now = get_taiwan_now().strftime("%Y-%m-%d %H:%M:%S")
+        ws.append_row([order_id, date, start, end, service_name, price, name, phone, 'confirmed', now])
+        print(f"[除錯] 預約寫入成功: {order_id}")
+        return True
+    except Exception as e:
+        print(f"[錯誤] 建立預約失敗: {e}")
+        return False
+
+def delete_booking_by_order_id(order_id):
+    try:
+        sheet = get_google_sheet()
+        ws = sheet.worksheet("預約紀錄")
+        records = ws.get_all_records()
+        for idx, r in enumerate(records, start=2):
+            if r.get('訂單編號') == order_id:
+                ws.delete_rows(idx)
+                print(f"[除錯] 已刪除訂單 {order_id}")
+                return True
+        return False
+    except Exception as e:
+        print(f"[錯誤] 刪除訂單失敗: {e}")
+        return False
+
+def get_today_bookings():
+    today = get_taiwan_now().date()
+    try:
+        sheet = get_google_sheet()
+        ws = sheet.worksheet("預約紀錄")
+        records = ws.get_all_records()
+        confirmed = [r for r in records if r.get('狀態') == 'confirmed']
+        result = []
+        for r in confirmed:
+            booking_date = datetime.strptime(r.get('日期'), '%Y-%m-%d').date()
+            if booking_date >= today:
+                result.append(r)
+        return result
+    except Exception as e:
+        print(f"[錯誤] 取得今日訂單失敗: {e}")
+        return []
+
+def notify_admins_new_booking(order_id, date, start, end, service_name, price, name, phone):
+    """向所有店家發送新訂單通知"""
+    print(f"[通知] 開始發送新訂單通知: {order_id}")
+    try:
+        sheet = get_google_sheet()
+        admin_ws = sheet.worksheet("店家後台")
+        admins_raw = admin_ws.col_values(1)
+        print(f"[通知] 原始店家列表: {admins_raw}")
+        admin_ids = [str(a).strip() for a in admins_raw if str(a).strip()]
+        print(f"[通知] 清理後店家 ID: {admin_ids}")
+        if not admin_ids:
+            print("[通知] 沒有設定店家 ID，跳過通知")
+            return
+        flex = {
+            "type": "bubble",
+            "header": {"type": "box", "layout": "vertical", "contents": [{"type": "text", "text": "📢 新訂單通知", "weight": "bold", "size": "xl", "color": "#FF5722", "align": "center"}]},
+            "body": {"type": "box", "layout": "vertical", "contents": [
+                {"type": "text", "text": f"📅 日期：{date}"},
+                {"type": "separator", "margin": "md"},
+                {"type": "text", "text": f"⏰ 時間：{start} ~ {end}", "margin": "md"},
+                {"type": "separator", "margin": "md"},
+                {"type": "text", "text": f"💆 服務：{service_name}", "margin": "md"},
+                {"type": "separator", "margin": "md"},
+                {"type": "text", "text": f"💰 金額：{price}元", "margin": "md", "weight": "bold", "color": "#FF5722"},
+                {"type": "separator", "margin": "md"},
+                {"type": "text", "text": f"👤 姓名：{name}", "margin": "md"},
+                {"type": "separator", "margin": "md"},
+                {"type": "text", "text": f"📞 電話：{phone}", "margin": "md"},
+                {"type": "separator", "margin": "md"},
+                {"type": "text", "text": f"🆔 訂單編號：{order_id}", "margin": "md", "size": "sm", "color": "#999999"}
+            ]},
+            "footer": {"type": "box", "layout": "vertical", "contents": [
+                {"type": "button", "action": {"type": "postback", "label": "📋 今日訂單", "data": "admin_today_orders"}, "color": "#2196F3"}
+            ]}
+        }
+        for admin_id in admin_ids:
+            try:
+                line_bot_api.push_message(admin_id, FlexSendMessage(alt_text="新訂單通知", contents=flex))
+                print(f"[通知] 已發送訂單 {order_id} 給店家 {admin_id}")
+            except Exception as e:
+                print(f"[通知] 發送給 {admin_id} 失敗: {e}")
+    except Exception as e:
+        print(f"[通知] 發送新訂單通知失敗: {e}")
+
+# ========== Flex 訊息（客戶預約流程） ==========
+def create_date_quick_reply(available_dates, offset=0):
+    weekday_names = ['一', '二', '三', '四', '五', '六', '日']
+    items = []
+    for i, d in enumerate(available_dates[offset:offset+10]):
+        label = d.strftime(f"%m/%d (週{weekday_names[d.weekday()]})")
+        items.append(QuickReplyButton(action=MessageAction(label=label, text=f"日期_{d.strftime('%Y-%m-%d')}")))
+    if len(available_dates) > offset+10:
+        items.append(QuickReplyButton(action=MessageAction(label="下一頁 ➡️", text="更多日期")))
+    if offset > 0:
+        items.append(QuickReplyButton(action=MessageAction(label="⬅️ 上一頁", text="上一頁日期")))
+    return QuickReply(items=items)
+
+def create_slots_flex(date_str, slots):
     buttons = []
-    for slot in available_slots:
+    for s in slots:
         buttons.append({
             "type": "button",
-            "action": {
-                "type": "postback",
-                "label": f"{slot['start']} ~ {slot['end']}",
-                "data": f"select_slot={date_str}|{slot['start']}|{slot['end']}"
-            },
+            "action": {"type": "postback", "label": f"{s['start']} ~ {s['end']}", "data": f"select_slot={date_str}|{s['start']}|{s['end']}"},
             "color": "#2196F3",
             "margin": "md"
         })
-    
     buttons.append({
         "type": "button",
-        "action": {
-            "type": "postback",
-            "label": "🔙 返回日曆",
-            "data": "back_to_calendar"
-        },
+        "action": {"type": "postback", "label": "🔙 重新選擇日期", "data": "back_to_date"},
         "color": "#9E9E9E",
         "margin": "lg"
     })
-    
-    return FlexMessage(
-        alt_text=f"{date_str} 可預約時段",
-        contents={
-            "type": "bubble",
-            "header": {
-                "type": "box",
-                "layout": "vertical",
-                "contents": [
-                    {
-                        "type": "text",
-                        "text": f"📅 {date_str}",
-                        "weight": "bold",
-                        "size": "xl"
-                    },
-                    {
-                        "type": "text",
-                        "text": "請選擇時段",
-                        "color": "#666666"
-                    }
-                ]
-            },
-            "body": {
-                "type": "box",
-                "layout": "vertical",
-                "contents": buttons
-            }
-        }
-    )
+    flex = {
+        "type": "bubble",
+        "header": {"type": "box", "layout": "vertical", "contents": [{"type": "text", "text": f"📅 {date_str}", "weight": "bold", "size": "xl"}, {"type": "text", "text": "請選擇時段", "color": "#666666"}]},
+        "body": {"type": "box", "layout": "vertical", "contents": buttons}
+    }
+    return FlexSendMessage(alt_text=f"{date_str} 可預約時段", contents=flex)
 
-def create_booking_detail_flex(order_id, date, start_time, end_time, name, phone):
-    """產生預約完成詳情 Flex 卡片"""
-    return FlexMessage(
-        alt_text="預約完成",
-        contents={
-            "type": "bubble",
-            "header": {
-                "type": "box",
-                "layout": "vertical",
-                "contents": [
-                    {
-                        "type": "text",
-                        "text": "✅ 預約完成",
-                        "weight": "bold",
-                        "size": "xl",
-                        "color": "#4CAF50",
-                        "align": "center"
-                    }
-                ]
-            },
-            "body": {
-                "type": "box",
-                "layout": "vertical",
-                "contents": [
-                    {"type": "text", "text": f"📅 日期：{date}"},
-                    {"type": "separator", "margin": "md"},
-                    {"type": "text", "text": f"⏰ 時間：{start_time} ~ {end_time}", "margin": "md"},
-                    {"type": "separator", "margin": "md"},
-                    {"type": "text", "text": f"👤 姓名：{name}", "margin": "md"},
-                    {"type": "separator", "margin": "md"},
-                    {"type": "text", "text": f"📞 電話：{phone}", "margin": "md"},
-                    {"type": "separator", "margin": "md"},
-                    {"type": "text", "text": f"🆔 訂單編號：{order_id}", "margin": "md", "size": "sm", "color": "#999999"}
-                ]
-            },
-            "footer": {
-                "type": "box",
-                "layout": "vertical",
-                "contents": [
-                    {
-                        "type": "button",
-                        "action": {
-                            "type": "postback",
-                            "label": "📋 查詢我的預約",
-                            "data": "my_bookings"
-                        },
-                        "color": "#2196F3"
+def create_service_flex():
+    buttons = []
+    for s in SERVICES:
+        buttons.append({
+            "type": "button",
+            "action": {"type": "postback", "label": f"{s['name']} - {s['price']}元", "data": f"select_service={s['id']}|{s['name']}|{s['price']}"},
+            "color": "#9C27B0",
+            "margin": "md"
+        })
+    flex = {
+        "type": "bubble",
+        "header": {"type": "box", "layout": "vertical", "contents": [{"type": "text", "text": "💆 請選擇服務項目", "weight": "bold", "size": "xl", "align": "center"}]},
+        "body": {"type": "box", "layout": "vertical", "contents": buttons}
+    }
+    return FlexSendMessage(alt_text="服務項目選擇", contents=flex)
+
+def create_booking_detail_flex(order_id, date, start, end, service_name, price, name, phone):
+    flex = {
+        "type": "bubble",
+        "header": {"type": "box", "layout": "vertical", "contents": [{"type": "text", "text": "✅ 預約完成", "weight": "bold", "size": "xl", "color": "#4CAF50", "align": "center"}]},
+        "body": {"type": "box", "layout": "vertical", "contents": [
+            {"type": "text", "text": f"📅 日期：{date}"},
+            {"type": "separator", "margin": "md"},
+            {"type": "text", "text": f"⏰ 時間：{start} ~ {end}", "margin": "md"},
+            {"type": "separator", "margin": "md"},
+            {"type": "text", "text": f"💆 服務：{service_name}", "margin": "md"},
+            {"type": "separator", "margin": "md"},
+            {"type": "text", "text": f"💰 金額：{price}元", "margin": "md", "weight": "bold", "color": "#FF5722"},
+            {"type": "separator", "margin": "md"},
+            {"type": "text", "text": f"👤 姓名：{name}", "margin": "md"},
+            {"type": "separator", "margin": "md"},
+            {"type": "text", "text": f"📞 電話：{phone}", "margin": "md"},
+            {"type": "separator", "margin": "md"},
+            {"type": "text", "text": f"🆔 訂單編號：{order_id}", "margin": "md", "size": "sm", "color": "#999999"},
+            {"type": "separator", "margin": "md"},
+            {"type": "text", "text": "📌 提醒您：\n• 請準時到達\n• 取消預約請提早告知\n• 調理當天請穿著寬鬆褲裝", "margin": "md", "size": "sm", "color": "#666666", "wrap": True}
+        ]},
+        "footer": {"type": "box", "layout": "vertical", "contents": [
+            {"type": "button", "action": {"type": "postback", "label": "🏠 主選單", "data": "main_menu"}, "color": "#666666"}
+        ]}
+    }
+    return FlexSendMessage(alt_text="預約完成", contents=flex)
+
+def create_order_list_flex(orders, title="訂單列表"):
+    if not orders:
+        return TextSendMessage(text="目前無符合的訂單")
+    contents = []
+    for i, b in enumerate(orders[:10]):
+        order_id = b.get('訂單編號', '無')
+        date = b.get('日期', '未知')
+        start = b.get('開始時間', '未知')
+        service = b.get('服務項目', '無')
+        price = b.get('金額', '0')
+        name = b.get('客戶姓名', '未知')
+        phone = b.get('客戶電話', '未知')
+        order_box = {
+            "type": "box",
+            "layout": "vertical",
+            "margin": "md",
+            "contents": [
+                {"type": "text", "text": f"📅 {date} {start}", "weight": "bold", "size": "sm"},
+                {"type": "text", "text": f"💆 {service} ({price}元)", "size": "xs", "color": "#FF5722"},
+                {"type": "text", "text": f"👤 {name} ({phone})", "size": "xs", "color": "#666666"},
+                {"type": "text", "text": f"🆔 {order_id}", "size": "xs", "color": "#999999", "wrap": True},
+                {"type": "separator", "margin": "sm"},
+                {
+                    "type": "button",
+                    "action": {
+                        "type": "postback",
+                        "label": "🗑️ 刪除此訂單",
+                        "data": f"admin_delete_order={order_id}",
+                        "displayText": f"刪除訂單 {order_id}"
                     },
-                    {
-                        "type": "button",
-                        "action": {
-                            "type": "postback",
-                            "label": "🏠 主選單",
-                            "data": "main_menu"
-                        },
-                        "color": "#666666",
-                        "margin": "sm"
-                    }
-                ]
-            }
+                    "color": "#F44336",
+                    "style": "primary",
+                    "margin": "sm"
+                }
+            ]
         }
-    )
+        contents.append(order_box)
+    if len(orders) > 10:
+        contents.append({"type": "text", "text": f"... 共 {len(orders)} 筆，僅顯示最近 10 筆", "size": "xs", "color": "#aaaaaa", "margin": "md"})
+    flex = {
+        "type": "bubble",
+        "header": {"type": "box", "layout": "vertical", "contents": [{"type": "text", "text": title, "weight": "bold", "size": "xl", "align": "center"}]},
+        "body": {"type": "box", "layout": "vertical", "contents": contents, "spacing": "sm"},
+        "footer": {"type": "box", "layout": "vertical", "contents": [
+            {"type": "button", "action": {"type": "postback", "label": "🔙 返回店家後台", "data": "admin_menu"}, "color": "#666666"}
+        ]}
+    }
+    return FlexSendMessage(alt_text=title, contents=flex)
 
 def create_admin_menu_flex():
-    """產生店家後台選單 Flex 卡片"""
-    stats = get_statistics()
-    
-    return FlexMessage(
-        alt_text="店家後台",
-        contents={
-            "type": "bubble",
-            "header": {
-                "type": "box",
-                "layout": "vertical",
-                "contents": [
-                    {
-                        "type": "text",
-                        "text": "🔧 店家後台",
-                        "weight": "bold",
-                        "size": "xl",
-                        "align": "center"
-                    }
-                ]
-            },
-            "body": {
-                "type": "box",
-                "layout": "vertical",
-                "contents": [
-                    {
-                        "type": "text",
-                        "text": f"📊 營業統計",
-                        "weight": "bold",
-                        "size": "md"
-                    },
-                    {"type": "text", "text": f"總預約數：{stats['total']}"},
-                    {"type": "text", "text": f"本月預約：{stats['this_month']}"},
-                    {"type": "text", "text": f"已取消：{stats['cancelled']}"},
-                    {"type": "separator", "margin": "md"},
-                    {
-                        "type": "button",
-                        "action": {
-                            "type": "postback",
-                            "label": "📋 查看所有訂單",
-                            "data": "admin_view_orders"
-                        },
-                        "color": "#FF9800",
-                        "margin": "md"
-                    },
-                    {
-                        "type": "button",
-                        "action": {
-                            "type": "postback",
-                            "label": "❌ 取消訂單",
-                            "data": "admin_cancel_order"
-                        },
-                        "color": "#F44336",
-                        "margin": "md"
-                    },
-                    {
-                        "type": "button",
-                        "action": {
-                            "type": "postback",
-                            "label": "🏠 主選單",
-                            "data": "main_menu"
-                        },
-                        "color": "#666666",
-                        "margin": "md"
-                    }
-                ]
-            }
-        }
-    )
+    flex = {
+        "type": "bubble",
+        "header": {"type": "box", "layout": "vertical", "contents": [{"type": "text", "text": "🔧 店家後台", "weight": "bold", "size": "xl", "align": "center"}]},
+        "body": {"type": "box", "layout": "vertical", "contents": [
+            {"type": "text", "text": "請選擇功能：", "weight": "bold", "margin": "md"},
+            {"type": "button", "action": {"type": "postback", "label": "📅 今日訂單", "data": "admin_today_orders"}, "color": "#2196F3", "margin": "md"},
+            {"type": "button", "action": {"type": "postback", "label": "🏠 主選單", "data": "main_menu"}, "color": "#666666", "margin": "md"}
+        ]}
+    }
+    return FlexSendMessage(alt_text="店家後台", contents=flex)
 
-# ========== LINE Webhook 處理 ==========
+# ========== Webhook 處理 ==========
 @app.route("/callback", methods=['POST'])
 def callback():
     signature = request.headers['X-Line-Signature']
     body = request.get_data(as_text=True)
-    
     try:
         handler.handle(body, signature)
     except InvalidSignatureError:
         abort(400)
-    
     return 'OK'
 
-# 暫存使用者輸入（姓名/電話）
-user_session = {}
+@app.route("/", methods=['GET'])
+def health():
+    return "OK"
 
-@handler.add(MessageEvent, message=TextMessageContent)
+user_session = {}
+date_offset = {}
+
+@handler.add(FollowEvent)
+def handle_follow(event):
+    send_welcome_with_menu(event)
+
+@handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
     user_id = event.source.user_id
     text = event.message.text.strip()
-    
-    # 主選單快速回覆
-    if text == "主選單" or text == "開始" or text == "選單":
-        quick_reply = QuickReply(
-            items=[
-                QuickReplyItem(action=MessageAction(label="📅 立即預約", text="我要預約")),
-                QuickReplyItem(action=MessageAction(label="📋 查詢預約", text="查詢預約")),
-                QuickReplyItem(action=MessageAction(label="❌ 取消預約", text="取消預約"))
-            ]
-        )
-        line_bot_api.reply_message(
-            ReplyMessageRequest(
-                reply_token=event.reply_token,
-                messages=[TextMessage(text="歡迎使用頭薦骨調理預約系統，請選擇功能：", quick_reply=quick_reply)]
-            )
-        )
+    print(f"[除錯] 使用者 LINE ID: {user_id} | 訊息: {text}")
+
+    if text.lower() in ["嗨", "hello", "你好", "開始", "start", "主選單"]:
+        send_welcome_with_menu(event)
         return
-    
-    # 處理預約流程的姓名/電話輸入
-    if user_id in user_session and user_session[user_id].get("step"):
-        step = user_session[user_id]["step"]
-        
-        if step == "waiting_name":
-            # 儲存姓名，詢問電話
-            user_session[user_id]["name"] = text
-            user_session[user_id]["step"] = "waiting_phone"
-            line_bot_api.reply_message(
-                ReplyMessageRequest(
-                    reply_token=event.reply_token,
-                    messages=[TextMessage(text="請輸入您的電話號碼：")]
-                )
-            )
-            return
-        
-        elif step == "waiting_phone":
-            # 儲存電話，完成預約
-            name = user_session[user_id]["name"]
-            phone = text
+
+    if text.startswith("日期_"):
+        date_str = text.replace("日期_", "")
+        slots = get_available_slots(date_str)
+        if slots:
+            flex = create_slots_flex(date_str, slots)
+            line_bot_api.reply_message(event.reply_token, flex)
+        else:
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="該日期已無可預約時段"))
+        return
+
+    if text == "更多日期":
+        offset = date_offset.get(user_id, 0) + 10
+        available_dates = get_available_dates()
+        if offset < len(available_dates):
+            date_offset[user_id] = offset
+            quick = create_date_quick_reply(available_dates, offset)
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="請選擇日期：", quick_reply=quick))
+        else:
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="沒有更多可預約日期了"))
+        return
+    if text == "上一頁日期":
+        offset = date_offset.get(user_id, 0) - 10
+        if offset >= 0:
+            date_offset[user_id] = offset
+            available_dates = get_available_dates()
+            quick = create_date_quick_reply(available_dates, offset)
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="請選擇日期：", quick_reply=quick))
+        else:
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="已經是第一頁了"))
+        return
+
+    if user_id in user_session and user_session[user_id].get("step") == "waiting_name_phone":
+        parts = text.split()
+        if len(parts) >= 2:
+            name = parts[0]
+            phone = parts[1]
             date = user_session[user_id]["date"]
-            start_time = user_session[user_id]["start_time"]
-            end_time = user_session[user_id]["end_time"]
+            start = user_session[user_id]["start"]
+            end = user_session[user_id]["end"]
+            service_name = user_session[user_id]["service_name"]
+            price = user_session[user_id]["price"]
             order_id = str(uuid.uuid4())[:8]
-            
-            create_booking(order_id, date, start_time, end_time, name, phone)
-            
-            # 清除 session
-            del user_session[user_id]
-            
-            # 發送預約完成 Flex
-            reply_flex = create_booking_detail_flex(order_id, date, start_time, end_time, name, phone)
-            line_bot_api.reply_message(
-                ReplyMessageRequest(
-                    reply_token=event.reply_token,
-                    messages=[reply_flex]
-                )
-            )
-            return
-    
-    # 一般功能選單
+            if create_booking(order_id, date, start, end, service_name, price, name, phone):
+                # 發送新訂單通知給店家
+                notify_admins_new_booking(order_id, date, start, end, service_name, price, name, phone)
+                del user_session[user_id]
+                flex = create_booking_detail_flex(order_id, date, start, end, service_name, price, name, phone)
+                line_bot_api.reply_message(event.reply_token, flex)
+            else:
+                line_bot_api.reply_message(event.reply_token, TextSendMessage(text="預約失敗，請稍後再試"))
+        else:
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="格式錯誤，請輸入「姓名 電話」"))
+        return
+
     if text == "我要預約":
-        # 顯示當前月份日曆
-        now = get_taiwan_now()
-        year, month = now.year, now.month
-        available_dates = get_available_dates(year, month)
-        calendar_flex = create_calendar_flex(year, month, available_dates)
-        line_bot_api.reply_message(
-            ReplyMessageRequest(
-                reply_token=event.reply_token,
-                messages=[calendar_flex]
-            )
-        )
-    
-    elif text == "查詢預約":
-        line_bot_api.reply_message(
-            ReplyMessageRequest(
-                reply_token=event.reply_token,
-                messages=[TextMessage(text="請輸入您預約時留的電話號碼：")]
-            )
-        )
-        user_session[user_id] = {"step": "query_phone"}
-    
-    elif text == "取消預約":
-        line_bot_api.reply_message(
-            ReplyMessageRequest(
-                reply_token=event.reply_token,
-                messages=[TextMessage(text="請輸入您預約時留的電話號碼：")]
-            )
-        )
-        user_session[user_id] = {"step": "cancel_phone"}
-    
-    elif user_id in user_session and user_session[user_id].get("step") == "query_phone":
-        phone = text
-        bookings = get_user_bookings(phone)
-        if bookings:
-            msg = "📋 您的預約紀錄：\n\n"
-            for b in bookings:
-                msg += f"📅 {b['日期']} {b['開始時間']}~{b['結束時間']}\n"
-                msg += f"訂單編號：{b['訂單編號']}\n\n"
-            line_bot_api.reply_message(
-                ReplyMessageRequest(
-                    reply_token=event.reply_token,
-                    messages=[TextMessage(text=msg)]
-                )
-            )
+        available_dates = get_available_dates()
+        if available_dates:
+            date_offset[user_id] = 0
+            quick = create_date_quick_reply(available_dates, 0)
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="請選擇預約日期：", quick_reply=quick))
         else:
-            line_bot_api.reply_message(
-                ReplyMessageRequest(
-                    reply_token=event.reply_token,
-                    messages=[TextMessage(text="查無預約紀錄")]
-                )
-            )
-        del user_session[user_id]
-    
-    elif user_id in user_session and user_session[user_id].get("step") == "cancel_phone":
-        phone = text
-        bookings = get_user_bookings(phone)
-        if bookings:
-            # 顯示可取消的訂單
-            cancel_options = []
-            for b in bookings:
-                cancel_options.append({
-                    "type": "button",
-                    "action": {
-                        "type": "postback",
-                        "label": f"{b['日期']} {b['開始時間']}",
-                        "data": f"user_cancel={b['訂單編號']}"
-                    }
-                })
-            line_bot_api.reply_message(
-                ReplyMessageRequest(
-                    reply_token=event.reply_token,
-                    messages=[TextMessage(text="請選擇要取消的訂單：")]
-                )
-            )
-            # 實際應用應發送 Flex 讓使用者選擇
-        else:
-            line_bot_api.reply_message(
-                ReplyMessageRequest(
-                    reply_token=event.reply_token,
-                    messages=[TextMessage(text="查無預約紀錄")]
-                )
-            )
-        del user_session[user_id]
-    
-    # 店家後台（需檢查權限）
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="目前尚無可預約日期"))
+
     elif text == "店家後台":
-        sheet = get_google_sheet()
-        admin_sheet = sheet.worksheet("店家後台")
-        admins = admin_sheet.col_values(1)
-        if user_id in admins:
+        if is_admin(user_id):
             admin_flex = create_admin_menu_flex()
-            line_bot_api.reply_message(
-                ReplyMessageRequest(
-                    reply_token=event.reply_token,
-                    messages=[admin_flex]
-                )
-            )
+            line_bot_api.reply_message(event.reply_token, admin_flex)
         else:
-            line_bot_api.reply_message(
-                ReplyMessageRequest(
-                    reply_token=event.reply_token,
-                    messages=[TextMessage(text="您無權限使用店家後台")]
-                )
-            )
-    
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="您無權限使用店家後台"))
+    elif text == "今日" and is_admin(user_id):
+        bookings = get_today_bookings()
+        if bookings:
+            flex = create_order_list_flex(bookings, "📅 今日以後訂單")
+            line_bot_api.reply_message(event.reply_token, flex)
+        else:
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="目前沒有今日以後的訂單"))
     else:
-        line_bot_api.reply_message(
-            ReplyMessageRequest(
-                reply_token=event.reply_token,
-                messages=[TextMessage(text="請輸入「主選單」開始使用")]
-            )
-        )
+        if is_admin(user_id):
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="請使用「今日」查看訂單，或點選後台按鈕"))
+        else:
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="請點選下方按鈕預約：", quick_reply=get_main_menu_quick_reply(user_id)))
 
 @handler.add(PostbackEvent)
 def handle_postback(event):
     user_id = event.source.user_id
     data = event.postback.data
-    
-    # 月份切換
-    if data.startswith("change_month="):
-        _, ym = data.split("=")
-        year, month = map(int, ym.split(","))
-        if month < 1:
-            month = 12
-            year -= 1
-        elif month > 12:
-            month = 1
-            year += 1
-        available_dates = get_available_dates(year, month)
-        calendar_flex = create_calendar_flex(year, month, available_dates)
-        line_bot_api.reply_message(
-            ReplyMessageRequest(
-                reply_token=event.reply_token,
-                messages=[calendar_flex]
-            )
-        )
-    
-    # 選擇日期
-    elif data.startswith("select_date="):
-        date_str = data.split("=")[1]
-        available_slots = get_available_slots(date_str)
-        if available_slots:
-            slots_flex = create_slots_flex(date_str, available_slots)
-            line_bot_api.reply_message(
-                ReplyMessageRequest(
-                    reply_token=event.reply_token,
-                    messages=[slots_flex]
-                )
-            )
-        else:
-            line_bot_api.reply_message(
-                ReplyMessageRequest(
-                    reply_token=event.reply_token,
-                    messages=[TextMessage(text="該日期已無可預約時段，請選擇其他日期")]
-                )
-            )
-    
-    # 選擇時段
-    elif data.startswith("select_slot="):
+
+    if data.startswith("select_slot="):
         _, info = data.split("=")
-        date_str, start_time, end_time = info.split("|")
-        user_session[user_id] = {
-            "step": "waiting_name",
-            "date": date_str,
-            "start_time": start_time,
-            "end_time": end_time
-        }
-        line_bot_api.reply_message(
-            ReplyMessageRequest(
-                reply_token=event.reply_token,
-                messages=[TextMessage(text="請輸入您的姓名：")]
-            )
-        )
-    
-    # 返回日曆
-    elif data == "back_to_calendar":
-        now = get_taiwan_now()
-        year, month = now.year, now.month
-        available_dates = get_available_dates(year, month)
-        calendar_flex = create_calendar_flex(year, month, available_dates)
-        line_bot_api.reply_message(
-            ReplyMessageRequest(
-                reply_token=event.reply_token,
-                messages=[calendar_flex]
-            )
-        )
-    
-    # 主選單
+        date_str, start, end = info.split("|")
+        user_session[user_id] = {"step": "waiting_service", "date": date_str, "start": start, "end": end}
+        service_flex = create_service_flex()
+        line_bot_api.reply_message(event.reply_token, service_flex)
+    elif data.startswith("select_service="):
+        _, info = data.split("=")
+        service_id, service_name, price = info.split("|")
+        price = int(price)
+        session_data = user_session.get(user_id, {})
+        session_data.update({"service_id": service_id, "service_name": service_name, "price": price, "step": "waiting_name_phone"})
+        if "date" not in session_data or "start" not in session_data:
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="請重新預約"))
+            return
+        user_session[user_id] = session_data
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=f"您選擇：{service_name} {price}元\n請輸入您的姓名和電話（例如：王小明 0912345678）："))
+    elif data == "back_to_date":
+        available_dates = get_available_dates()
+        if available_dates:
+            date_offset[user_id] = 0
+            quick = create_date_quick_reply(available_dates, 0)
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="請重新選擇日期：", quick_reply=quick))
+        else:
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="目前尚無可預約日期"))
     elif data == "main_menu":
-        quick_reply = QuickReply(
-            items=[
-                QuickReplyItem(action=MessageAction(label="📅 立即預約", text="我要預約")),
-                QuickReplyItem(action=MessageAction(label="📋 查詢預約", text="查詢預約")),
-                QuickReplyItem(action=MessageAction(label="❌ 取消預約", text="取消預約"))
-            ]
-        )
-        line_bot_api.reply_message(
-            ReplyMessageRequest(
-                reply_token=event.reply_token,
-                messages=[TextMessage(text="歡迎使用頭薦骨調理預約系統，請選擇功能：", quick_reply=quick_reply)]
-            )
-        )
-    
-    # 店家後台 - 查看訂單
-    elif data == "admin_view_orders":
-        bookings = get_all_bookings()
+        send_welcome_with_menu(event)
+    elif data == "admin_menu":
+        if is_admin(user_id):
+            admin_flex = create_admin_menu_flex()
+            line_bot_api.reply_message(event.reply_token, admin_flex)
+        else:
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="您無權限使用店家後台"))
+    elif data == "admin_today_orders":
+        if not is_admin(user_id):
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="您無權限執行此操作"))
+            return
+        bookings = get_today_bookings()
         if bookings:
-            msg = "📋 所有有效訂單：\n\n"
-            for b in bookings:
-                msg += f"📅 {b['日期']} {b['開始時間']}~{b['結束時間']}\n"
-                msg += f"👤 {b['客戶姓名']} ({b['客戶電話']})\n"
-                msg += f"🆔 {b['訂單編號']}\n\n"
-            line_bot_api.reply_message(
-                ReplyMessageRequest(
-                    reply_token=event.reply_token,
-                    messages=[TextMessage(text=msg)]
-                )
-            )
+            flex = create_order_list_flex(bookings, "📅 今日以後訂單")
+            line_bot_api.reply_message(event.reply_token, flex)
         else:
-            line_bot_api.reply_message(
-                ReplyMessageRequest(
-                    reply_token=event.reply_token,
-                    messages=[TextMessage(text="目前無有效訂單")]
-                )
-            )
-    
-    # 店家後台 - 取消訂單
-    elif data == "admin_cancel_order":
-        line_bot_api.reply_message(
-            ReplyMessageRequest(
-                reply_token=event.reply_token,
-                messages=[TextMessage(text="請輸入要取消的訂單編號：")]
-            )
-        )
-        user_session[user_id] = {"step": "admin_cancel"}
-    
-    elif user_id in user_session and user_session[user_id].get("step") == "admin_cancel":
-        order_id = data  # 實際應從文字訊息取得
-        if cancel_booking(order_id):
-            line_bot_api.reply_message(
-                ReplyMessageRequest(
-                    reply_token=event.reply_token,
-                    messages=[TextMessage(text=f"訂單 {order_id} 已取消")]
-                )
-            )
-        else:
-            line_bot_api.reply_message(
-                ReplyMessageRequest(
-                    reply_token=event.reply_token,
-                    messages=[TextMessage(text="訂單編號不存在或已取消")]
-                )
-            )
-        del user_session[user_id]
-    
-    # 使用者自行取消
-    elif data.startswith("user_cancel="):
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="目前沒有今日以後的訂單"))
+    elif data.startswith("admin_delete_order="):
+        if not is_admin(user_id):
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="您無權限執行此操作"))
+            return
         order_id = data.split("=")[1]
-        if cancel_booking(order_id):
-            line_bot_api.reply_message(
-                ReplyMessageRequest(
-                    reply_token=event.reply_token,
-                    messages=[TextMessage(text=f"已取消預約 {order_id}")]
-                )
-            )
+        if delete_booking_by_order_id(order_id):
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text=f"✅ 已刪除訂單 {order_id}"))
+            new_bookings = get_today_bookings()
+            if new_bookings:
+                flex = create_order_list_flex(new_bookings, "📅 更新後的訂單")
+                line_bot_api.push_message(user_id, flex)
+            else:
+                line_bot_api.push_message(user_id, TextSendMessage(text="目前沒有今日以後的訂單"))
         else:
-            line_bot_api.reply_message(
-                ReplyMessageRequest(
-                    reply_token=event.reply_token,
-                    messages=[TextMessage(text="取消失敗，請聯繫店家")]
-                )
-            )
-    
-    elif data == "my_bookings":
-        line_bot_api.reply_message(
-            ReplyMessageRequest(
-                reply_token=event.reply_token,
-                messages=[TextMessage(text="請輸入您預約時留的電話號碼：")]
-            )
-        )
-        user_session[user_id] = {"step": "query_phone"}
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text=f"❌ 刪除失敗，訂單 {order_id} 不存在"))
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
